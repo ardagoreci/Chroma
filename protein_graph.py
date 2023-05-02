@@ -3,6 +3,7 @@ networks to constrain computational costs to O(N) for a system of N atoms. This 
 generation and graph featurization processes."""
 import jax.numpy as jnp
 import jax
+import numpy as np
 
 
 @jax.jit
