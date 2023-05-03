@@ -33,7 +33,7 @@ def visualize_connections(pdb_path, residue_pairs, cylinder_color='red', sphere_
         pdb_path: the path for the pdb file
         residue_pairs: a list of tuples (res1, res2) that indicates which residues are connected to each other
         cylinder_color: the connections are added as cylinders in py3Dmol, the color of cylinders
-        sphere_color: at the end of connections, there is a sphere to indicate the residue, the color of those spheres
+        sphere_color: at the end of connections, there is a sphere to indicate the residue, the color of spheres
         radius: the radius of connecting cylinder
         sphere_radius: the radius of spheres indicating the residues
     Credit: GPT-4"""
