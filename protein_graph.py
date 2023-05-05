@@ -62,10 +62,7 @@ def sample_random_graph(key, backbone_coordinates, temperature=1.0) -> jnp.array
     k_cubic = 40
     top_k_nearest_neighbours = argsorted_distances[:, :k_nearest]  # top_k_nearest_neighbours.shape == (N_res, 20)
 
-    # Sample rest with inverse cubic distance (need careful measurements)
-    # Instead of sorted distances, I can simply mask those with a large value so that they will never be chosen.
-    # This way, I avoid this sorting nonsense
-    # If I find a way to perform this masking without
+    # Sample rest with inverse cubic distance
     distances = custom_put_along_axis(distances, top_k_nearest_neighbours, jnp.inf, axis=1)  # mask with inf distances
     remaining_distances = distances[:, k_nearest:]
     uniform_noise = jax.random.uniform(key, shape=remaining_distances.shape, minval=0.0, maxval=1.0)
