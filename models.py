@@ -15,6 +15,7 @@ import jax
 from flax import linen as nn
 from protein_graph import sample_random_graph
 
+
 # from typing import i
 
 # Methods for featurization
@@ -23,8 +24,9 @@ from protein_graph import sample_random_graph
 
 
 def gather_edges(features, topology) -> jnp.array:
-    """Utility function that extracts relevant node values from node_array given graph topology. This function is
+    """Utility function that extracts relevant edge features from "features" given graph topology. This function is
     written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+    Features [N,N,C] at Neighbor indices [N,K] => Neighbor features [N,K,C]
     Args:
         features: an array of shape [N, N, C] where N is the number of nodes and C is the number of channels
         topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
@@ -37,6 +39,20 @@ def gather_edges(features, topology) -> jnp.array:
     neighbours = jnp.broadcast_to(jnp.expand_dims(topology, axis=-1), shape=(N, K, C))  # [N, K]=> [N, K, 1]=> [N, K, C]
     edge_features = jnp.take_along_axis(features, indices=neighbours, axis=1)
     return edge_features
+
+
+def gather_nodes(features, topology) -> jnp.array:
+    """Utility function that extracts relevant node features from "features" given graph topology. This function is
+    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+    Features [N,C] at Neighbor indices [N,K] => [N,K,C]
+    Args:
+        features: an array of shape [N, C] where N is the number of nodes and C is the number of channels
+        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
+        list of K edges where the elements encode the indices of the jth node
+    Returns: an array of shape [N, K, C] where the elements are gathered from features
+             [N,C] at topology [N,K] => node features [N,K,C]
+    """
+    return jnp.take_along_axis(features, )
 
 
 def compute_distances(a, b):
@@ -54,7 +70,6 @@ def compute_distances(a, b):
     return dists
 
 
-# noinspection PyAttributeOutsideInit
 class PositionalEncodings(nn.Module):
     """A module that implements relative positional encodings as edge features. Given an edge between two residues i
     and j, the relative positional encoding encodes the distance between i and j in the primary amino acid sequence.
@@ -79,7 +94,7 @@ class PositionalEncodings(nn.Module):
         (unit-tested)"""
         d = jax.lax.clamp(x=offset + self.max_relative_feature,
                           min=0, max=2 * self.max_relative_feature) * mask + (1 - mask) * (
-                        2 * self.max_relative_feature + 1)
+                    2 * self.max_relative_feature + 1)
         d_onehot = jax.nn.one_hot(d, 2 * self.max_relative_feature + 1 + 1)  # d_onehot.shape == (B, N, K, 32*2+1+1)
         # input features size: 2*max_relative_feature+1+1
         # output features size: num_embeddings
@@ -160,7 +175,7 @@ class ProteinFeatures(nn.Module):
         b = Ca - N
         c = C - Ca
         a = jnp.cross(b, c)
-        Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + Ca
+        Cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + Ca
 
         # Add N, Ca, C, O, Cb distances
         RBF_all = [self._get_rbf(Ca, Ca, topology), self._get_rbf(N, N, topology), self._get_rbf(C, C, topology),
@@ -180,6 +195,52 @@ class ProteinFeatures(nn.Module):
         E = self.edge_embeddings(E)  # embed with linear layer
         return E
 
+
 # Graph Neural Network
+class PositionWiseFeedForward(nn.Module):
+    """A module that applies position-wise feedforward operation as in the Transformer Paper. (unit-tested)"""
+    num_hidden: int
+    num_ff: int
+
+    @nn.compact
+    def __call__(self, h_V):
+        h = jax.nn.gelu(nn.Dense(self.num_ff)(h_V))
+        h = nn.Dense(self.num_hidden)(h)
+        return h
+
+
+class MPNNLayer(nn.Module):
+    """Implements a message passing neural network layer with node and edge updates."""
+    num_hidden: int
+    num_in: int
+    dropout: float = 0.1
+    scale: int = 60
+
+    def setup(self):
+        # node update MLP
+        self.node_mlp = nn.Sequential([
+            nn.Dense(self.num_hidden),
+            jax.nn.gelu,
+            nn.Dense(self.num_hidden),
+            jax.nn.gelu,
+            nn.Dense(self.num_hidden)
+        ])
+        # edge update MLP
+        self.edge_mlp = nn.Sequential([
+            nn.Dense(self.num_hidden),
+            jax.nn.gelu,
+            nn.Dense(self.num_hidden),
+            jax.nn.gelu,
+            nn.Dense(self.num_hidden)
+        ])
+        # Normalization Layers
+        self.norm1 = nn.LayerNorm()
+        self.norm2 = nn.LayerNorm()
+        self.norm3 = nn.LayerNorm()
+
+    def __call__(self, h_V, h_E, topology):
+        """I"""
+        pass
+
 # Inter-residue Geometry Prediction
 # Backbone solver
