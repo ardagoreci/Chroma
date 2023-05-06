@@ -51,8 +51,30 @@ def gather_nodes(features, topology) -> jnp.array:
         list of K edges where the elements encode the indices of the jth node
     Returns: an array of shape [N, K, C] where the elements are gathered from features
              [N,C] at topology [N,K] => node features [N,K,C]
-    """
-    return jnp.take_along_axis(features, )
+    (unit-tested)"""
+    N, C = features.shape
+    _, K = topology.shape
+    # Flatten and broadcast [N,K] => [NK, 1] => [NK,C]
+    neighbours_flat = jnp.reshape(topology, (N*K, 1))
+    neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N*K, C))
+    # Take and repack
+    neighbour_features = jnp.take_along_axis(features, indices=neighbours_flat, axis=0)
+    neighbour_features = jnp.reshape(neighbour_features, (N, K, C))
+    return neighbour_features
+
+
+def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
+    """Utility function that concatenates node embeddings with that of its neighbours given graph topology. Concatenate ij with j.
+    This function is written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+    Args:
+        h_nodes: node embeddings of shape [N, C]
+        h_edges: edge embeddings of shape [N, K, C]
+        topology: topology array of shape [N, K]
+    Returns: concatenated features of shape [N, K, 2*C]
+    (unit-tested)"""
+    h_nodes = gather_nodes(h_nodes, topology)
+    h_nn = jnp.concatenate([h_nodes, h_edges], axis=-1)
+    return h_nn
 
 
 def compute_distances(a, b):
@@ -209,6 +231,7 @@ class PositionWiseFeedForward(nn.Module):
         return h
 
 
+# noinspection PyAttributeOutsideInit
 class MPNNLayer(nn.Module):
     """Implements a message passing neural network layer with node and edge updates."""
     num_hidden: int
@@ -217,7 +240,7 @@ class MPNNLayer(nn.Module):
     scale: int = 60
 
     def setup(self):
-        # node update MLP
+        # node message MLP
         self.node_mlp = nn.Sequential([
             nn.Dense(self.num_hidden),
             jax.nn.gelu,
@@ -225,7 +248,7 @@ class MPNNLayer(nn.Module):
             jax.nn.gelu,
             nn.Dense(self.num_hidden)
         ])
-        # edge update MLP
+        # edge message MLP
         self.edge_mlp = nn.Sequential([
             nn.Dense(self.num_hidden),
             jax.nn.gelu,
@@ -238,9 +261,44 @@ class MPNNLayer(nn.Module):
         self.norm2 = nn.LayerNorm()
         self.norm3 = nn.LayerNorm()
 
+        # Dropout
+        self.dropout = nn.Dropout(rate=self.dropout)
+
+        # Position-wise feedforward
+        self.dense = PositionWiseFeedForward(num_hidden=self.num_hidden,
+                                             num_ff=self.num_hidden*4)  # following ProteinMPNN
+
     def __call__(self, h_V, h_E, topology):
-        """I"""
-        pass
+        """Parallel computation of full MPNN layer
+        Args:
+            h_V: node activations of shape [B, N, C]
+            h_E: edge activations of shape [B, N, K, C]
+        """
+        B, N, K, C = h_E.shape
+        # Concat i, ij, j
+        h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
+        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2), shape=(B, N, K, C))  # expand and broadcast
+        h_EV = jnp.concatenate([h_V_broad, h_EV], axis=-1)
+
+        # Compute node Message with MLP
+        h_message = self.node_mlp(h_EV)
+        # Sum to i
+        dh = jnp.sum(h_message, axis=-2) / self.scale
+        h_V = self.norm1(h_V + self.dropout(dh))
+
+        # Position-wise feedforward
+        dh = self.dense(h_V)
+        h_V = self.norm2(h_V + self.dropout(dh))
+
+        # Edge Updates
+        h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
+        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2), shape=(B, N, K, C))  # expand and broadcast
+        h_EV = jnp.concatenate([h_V_broad, h_EV], axis=-1)
+
+        # Compute edge message with MLP
+        h_message = self.edge_mlp(h_EV)
+        h_E = self.norm3(h_E + self.dropout(h_message))
+        return h_V, h_E
 
 # Inter-residue Geometry Prediction
 # Backbone solver
