@@ -248,7 +248,7 @@ class MPNNLayer(nn.Module):
             jax.nn.gelu,
             nn.Dense(self.num_hidden)
         ])
-        # edge message MLP
+        # edge update MLP
         self.edge_mlp = nn.Sequential([
             nn.Dense(self.num_hidden),
             jax.nn.gelu,
@@ -264,7 +264,7 @@ class MPNNLayer(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(rate=self.dropout)
 
-        # Position-wise feedforward
+        # Position-wise feedforward (acts as node update MLP)
         self.dense = PositionWiseFeedForward(num_hidden=self.num_hidden,
                                              num_ff=self.num_hidden*4)  # following ProteinMPNN
 
@@ -295,9 +295,9 @@ class MPNNLayer(nn.Module):
         h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2), shape=(B, N, K, C))  # expand and broadcast
         h_EV = jnp.concatenate([h_V_broad, h_EV], axis=-1)
 
-        # Compute edge message with MLP
-        h_message = self.edge_mlp(h_EV)
-        h_E = self.norm3(h_E + self.dropout(h_message))
+        # Compute edge update with MLP
+        h_update = self.edge_mlp(h_EV)
+        h_E = self.norm3(h_E + self.dropout(h_update))
         return h_V, h_E
 
 # Inter-residue Geometry Prediction
