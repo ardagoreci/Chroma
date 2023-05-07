@@ -13,15 +13,8 @@ import flax
 import jax.numpy as jnp
 import jax
 from flax import linen as nn
-from typing import Tuple, Union
+from typing import Tuple
 from protein_graph import sample_random_graph
-
-
-# from typing import i
-
-# Methods for featurization
-# class PositionalEncodings
-# class ProteinFeatures
 
 
 def gather_edges(features, topology) -> jnp.array:
@@ -328,7 +321,7 @@ class BackboneGNN(nn.Module):
         Returns:
         """
         B, N, _, _ = noisy_coordinates.shape
-        keys = jax.random.split(jax.random.PRNGKey(1), num=B)[:, 0]  # keys.shape == (B,)
+        keys = jax.random.split(jax.random.PRNGKey(1), num=B)[:, 0]  # keys.shape == (B,2)
 
         # Graph sampling
         topologies = jax.vmap(sample_random_graph)(keys, noisy_coordinates)
@@ -370,24 +363,35 @@ class PairwiseGeometryPrediction(nn.Module):
         Args:
             pair_embeddings: [N, K, C]
         Returns:
+            a tuple of (translations, rotations, confidences) where:
+            *translations: an array of shape [N, K, 3] encoding a translation in 3D space (units of nanometers)
+            *rotations: an array of shape [N, K, 3, 3] encoding rotation matrices along the last two axes of shape
+                        [3,3] that are derived from quaternion predictions from the neural network.
+            *confidences: an array of shape [N, K, self.num_confidence_values] encoding the confidence values
         """
         output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
         confidences = output[:, :, :self.num_confidence_values]
         translations = output[:, :, self.num_confidence_values:self.num_confidence_values+3]
         # Compute Rotations
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
-        # K dimensions are batch dim
+        # K dimensions are batch dim to vectorize function with jax.vmap
         rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values+3:])
         return (translations, rotations), confidences
 
     @staticmethod
     def _get_rotation_matrix(array):
-        """Converts (non-unit) quaternion to rotation matrix. For details, see Wikipedia
-        https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation. (unit-tested, the angles make sense and
-        definitely have a relationship with SciPy quaternion matrix conversion, for a learning system, it should not
-        be a problem.)"""
+        """Converts (non-unit) quaternion to rotation matrix.
+        For details, see Wikipedia https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation.
+        Args:
+            array: encodes three components and has shape [3,] that define the Euler axis. These components are
+            predicted by the neural network.
+        Returns: a rotation matrix of shape [3, 3] computed from the quaternion. This procedure guarantees a valid
+                 normalized quaternion and favours small rotations over large rotations.
+
+        (unit-tested, the angles make sense and definitely have a relationship with SciPy quaternion matrix conversion,
+        for a learning system, it should not be a problem.)"""
         b, c, d = array[0], array[1], array[2]
-        quaternion = jnp.array([1, b, c, d])
+        quaternion = jnp.array([1, b, c, d])  # the first component of non-unit quaternion is fixed to 1.
         (a, b, c, d) = quaternion / jnp.sqrt(jnp.sum(quaternion**2))
         rot = jnp.array([[(a**2 + b**2 - c**2 - d**2), (2*b*c - 2*a*d), (2*b*d + 2*a*c)],
                          [(2*b*c + 2*a*d), (a**2 - b**2 + c**2 - d**2), (2*c*d - 2*a*b)],
