@@ -351,17 +351,18 @@ class BackboneGNN(nn.Module):
 # Inter-residue Geometry Prediction
 # noinspection PyAttributeOutsideInit
 class PairwiseGeometryPrediction(nn.Module):
-    """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given a
-    graph topology, node embeddings and edge embeddings."""
+    """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given node
+    embeddings and edge embeddings. """
     num_confidence_values: int = 1  # variable depending on whether isotropic or anisotropic confidences are used
 
     def setup(self):
         self.linear = nn.Dense(3+3+self.num_confidence_values)
 
-    def __call__(self, h_V, h_E, topologies):
-        pass
+    def __call__(self, h_V, h_E):
+        pairwise_transforms, pairwise_confidences = jax.vmap(self.backbone_update_with_confidence)(h_E)
+        return pairwise_transforms, pairwise_confidences
 
-    def backbone_update_with_confidence(self, pair_embeddings):
+    def backbone_update_with_confidence(self, pair_embeddings) -> Tuple[jnp.array, jnp.array, jnp.array]:
         """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
         embedding, a linear layer predicts a vector for the translation and three additional components that define the
         Euler axis. See AlphaFold Supplementary information section 1.8.3, Algorithm 23 "Backbone update".
@@ -370,10 +371,27 @@ class PairwiseGeometryPrediction(nn.Module):
             pair_embeddings: [N, K, C]
         Returns:
         """
-        output = self.linear(pair_embeddings)  # [N,K, 3+3+self.num_confidence_values]
+        output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
+        confidences = output[:, :, :self.num_confidence_values]
+        translations = output[:, :, self.num_confidence_values:self.num_confidence_values+3]
+        # Compute Rotations
+        get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
+        # K dimensions are batch dim
+        rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values+3:])
+        return (translations, rotations), confidences
 
-    def _get_rotation_matrix(self, b, c, d):
-        # Converts quaternion to rotation matrix
-        pass
+    @staticmethod
+    def _get_rotation_matrix(array):
+        """Converts (non-unit) quaternion to rotation matrix. For details, see Wikipedia
+        https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation. (unit-tested, the angles make sense and
+        definitely have a relationship with SciPy quaternion matrix conversion, for a learning system, it should not
+        be a problem.)"""
+        b, c, d = array[0], array[1], array[2]
+        quaternion = jnp.array([1, b, c, d])
+        (a, b, c, d) = quaternion / jnp.sqrt(jnp.sum(quaternion**2))
+        rot = jnp.array([[(a**2 + b**2 - c**2 - d**2), (2*b*c - 2*a*d), (2*b*d + 2*a*c)],
+                         [(2*b*c + 2*a*d), (a**2 - b**2 + c**2 - d**2), (2*c*d - 2*a*b)],
+                         [(2*b*d - 2*a*c), (2*c*d + 2*a*b), (a**2 - b**2 - c**2 + d**2)]])
+        return rot
 
 # Backbone solver
