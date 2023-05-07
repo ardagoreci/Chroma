@@ -41,7 +41,8 @@ def extract_carbon_alpha_coordinates(backbone_coordinates) -> jnp.array:
 def sample_random_graph(key, backbone_coordinates, temperature=1.0) -> jnp.array:
     """This method samples a stochastic graph topology given backbone coordinates of a protein. The sampling follows
     the conventions in the Chroma Paper: the top 20 nearest neighbours + 40 inverse cubic distance attachment
-    propensity. For details, see Algorithm 1 and Supplementary Figure 3 in the Chroma Paper.
+    propensity. For details, see Algorithm 1 and Supplementary Figure 3 in the Chroma Paper. Note: this method is
+    written for a single example.
     Args:
         key: random PRNG key
         backbone_coordinates: backbone coordinates for the protein of shape [N_res, 4, 3]. The backbone atoms should be

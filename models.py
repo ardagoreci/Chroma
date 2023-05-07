@@ -13,6 +13,7 @@ import flax
 import jax.numpy as jnp
 import jax
 from flax import linen as nn
+from typing import Tuple, Union
 from protein_graph import sample_random_graph
 
 
@@ -55,8 +56,8 @@ def gather_nodes(features, topology) -> jnp.array:
     N, C = features.shape
     _, K = topology.shape
     # Flatten and broadcast [N,K] => [NK, 1] => [NK,C]
-    neighbours_flat = jnp.reshape(topology, (N*K, 1))
-    neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N*K, C))
+    neighbours_flat = jnp.reshape(topology, (N * K, 1))
+    neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N * K, C))
     # Take and repack
     neighbour_features = jnp.take_along_axis(features, indices=neighbours_flat, axis=0)
     neighbour_features = jnp.reshape(neighbour_features, (N, K, C))
@@ -77,7 +78,7 @@ def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
     return h_nn
 
 
-def compute_distances(a, b):
+def compute_distances(a, b) -> jnp.array:
     """A function that computes an inter-atomic distance matrix given two arrays a and b encoding the distances.
     Args:
         a: an array of shape [N, 3]
@@ -142,8 +143,8 @@ class ProteinFeatures(nn.Module):
         self.edge_embeddings = nn.Dense(self.edge_features_dim)
         self.layer_norm = nn.LayerNorm()
 
-    def __call__(self, coordinates, topology):  # X, mask, residue_idx, chain_labels
-        return jax.vmap(self.single_example_forward)(coordinates, topology)
+    def __call__(self, coordinates, topologies):  # X, mask, residue_idx, chain_labels
+        return jax.vmap(self.single_example_forward)(coordinates, topologies)
 
     def _rbf(self, D) -> jnp.array:
         """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to
@@ -186,7 +187,8 @@ class ProteinFeatures(nn.Module):
         Args:
             coordinates: [N, B, 3]
             topology: [N, K]
-        Returns: an array of edge features with shape [N, K, self.edge_features_dim]
+        Returns: a tuple of edge features with shape [N, K, self.edge_features_dim] and node features
+                 [N, self.node_features_dim]. The node features are zeros.
         """
         N = coordinates[:, 0, :]
         Ca = coordinates[:, 1, :]
@@ -215,10 +217,11 @@ class ProteinFeatures(nn.Module):
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
         E = jnp.concatenate([positional_embedding, RBF_all], axis=-1)  # concatenate along last axis
         E = self.edge_embeddings(E)  # embed with linear layer
-        return E
+        node_zeros = jnp.zeros((coordinates.shape[0], self.node_features_dim))  # zeros as node features
+        return node_zeros, E
 
 
-# Graph Neural Network
+# Graph Neural Network Modules
 class PositionWiseFeedForward(nn.Module):
     """A module that applies position-wise feedforward operation as in the Transformer Paper. (unit-tested)"""
     num_hidden: int
@@ -234,27 +237,29 @@ class PositionWiseFeedForward(nn.Module):
 # noinspection PyAttributeOutsideInit
 class MPNNLayer(nn.Module):
     """Implements a message passing neural network layer with node and edge updates."""
-    num_hidden: int
-    num_in: int
+    node_embedding_dim: int
+    edge_embedding_dim: int
+    edge_mlp_hidden_dim: int
+    node_mlp_hidden_dim: int
     dropout: float = 0.1
     scale: int = 60
 
     def setup(self):
         # node message MLP
         self.node_mlp = nn.Sequential([
-            nn.Dense(self.num_hidden),
+            nn.Dense(self.node_mlp_hidden_dim),
             jax.nn.gelu,
-            nn.Dense(self.num_hidden),
+            nn.Dense(self.node_mlp_hidden_dim),
             jax.nn.gelu,
-            nn.Dense(self.num_hidden)
+            nn.Dense(self.node_embedding_dim)
         ])
         # edge update MLP
         self.edge_mlp = nn.Sequential([
-            nn.Dense(self.num_hidden),
+            nn.Dense(self.edge_mlp_hidden_dim),
             jax.nn.gelu,
-            nn.Dense(self.num_hidden),
+            nn.Dense(self.edge_mlp_hidden_dim),
             jax.nn.gelu,
-            nn.Dense(self.num_hidden)
+            nn.Dense(self.edge_embedding_dim)
         ])
         # Normalization Layers
         self.norm1 = nn.LayerNorm()
@@ -262,43 +267,113 @@ class MPNNLayer(nn.Module):
         self.norm3 = nn.LayerNorm()
 
         # Dropout
-        self.dropout = nn.Dropout(rate=self.dropout)
+        self.dropout_layer = nn.Dropout(rate=self.dropout, deterministic=False)
 
         # Position-wise feedforward (acts as node update MLP)
-        self.dense = PositionWiseFeedForward(num_hidden=self.num_hidden,
-                                             num_ff=self.num_hidden*4)  # following ProteinMPNN
+        self.dense = PositionWiseFeedForward(num_hidden=self.node_embedding_dim,
+                                             num_ff=self.node_mlp_hidden_dim)
 
     def __call__(self, h_V, h_E, topology):
         """Parallel computation of full MPNN layer
         Args:
-            h_V: node activations of shape [B, N, C]
-            h_E: edge activations of shape [B, N, K, C]
+            h_V: node activations of shape [B, N, V]
+            h_E: edge activations of shape [B, N, K, E]
         """
-        B, N, K, C = h_E.shape
+        B, N, K, _ = h_E.shape
         # Concat i, ij, j
         h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
-        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2), shape=(B, N, K, C))  # expand and broadcast
+        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2),
+                                     shape=(B, N, K, self.node_embedding_dim))  # expand and broadcast
         h_EV = jnp.concatenate([h_V_broad, h_EV], axis=-1)
 
         # Compute node Message with MLP
         h_message = self.node_mlp(h_EV)
         # Sum to i
         dh = jnp.sum(h_message, axis=-2) / self.scale
-        h_V = self.norm1(h_V + self.dropout(dh))
+        h_V = self.norm1(h_V + self.dropout_layer(dh))
 
         # Position-wise feedforward
         dh = self.dense(h_V)
-        h_V = self.norm2(h_V + self.dropout(dh))
+        h_V = self.norm2(h_V + self.dropout_layer(dh))
 
         # Edge Updates
         h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
-        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2), shape=(B, N, K, C))  # expand and broadcast
+        h_V_broad = jnp.broadcast_to(jnp.expand_dims(h_V, axis=-2),
+                                     shape=(B, N, K, self.node_embedding_dim))  # expand and broadcast
         h_EV = jnp.concatenate([h_V_broad, h_EV], axis=-1)
 
         # Compute edge update with MLP
         h_update = self.edge_mlp(h_EV)
-        h_E = self.norm3(h_E + self.dropout(h_update))
+        h_E = self.norm3(h_E + self.dropout_layer(h_update))
         return h_V, h_E
 
+
+class BackboneGNN(nn.Module):
+    """Implements the Chroma backbone GNN that takes in backbone coordinates and outputs a graph topology,
+    node embeddings and edge embeddings."""
+    node_embedding_dim: int = 512  # the default values are those of Backbone Network A in Chroma
+    edge_embedding_dim: int = 256
+    node_mlp_hidden_dim: int = 512
+    edge_mlp_hidden_dim: int = 128
+    num_gnn_layers: int = 12
+    dropout: float = 0.1  # dropout rate
+
+    @nn.compact
+    def __call__(self, key, noisy_coordinates):
+        """
+        h_V.shape == (B, N, node_embedding_dim) and h_E.shape == (B, N, K, edge_embedding_dim)
+        Args:
+            key: random PRNGKey
+            noisy_coordinates: noisy coordinates of shape (B, N, 4, 3)
+        Returns:
+        """
+        B, N, _, _ = noisy_coordinates.shape
+        keys = jax.random.split(jax.random.PRNGKey(1), num=B)[:, 0]  # keys.shape == (B,)
+
+        # Graph sampling
+        topologies = jax.vmap(sample_random_graph)(keys, noisy_coordinates)
+
+        # Graph featurization
+        h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
+                                   node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
+
+        # MPNN layers
+        for _ in range(self.num_gnn_layers):
+            h_V, h_E = MPNNLayer(node_embedding_dim=self.node_embedding_dim,
+                                 edge_embedding_dim=self.edge_embedding_dim,
+                                 edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
+                                 node_mlp_hidden_dim=self.node_mlp_hidden_dim,
+                                 dropout=self.dropout)(h_V, h_E, topologies)
+
+        return h_V, h_E, topologies
+
+
 # Inter-residue Geometry Prediction
+# noinspection PyAttributeOutsideInit
+class PairwiseGeometryPrediction(nn.Module):
+    """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given a
+    graph topology, node embeddings and edge embeddings."""
+    num_confidence_values: int = 1  # variable depending on whether isotropic or anisotropic confidences are used
+
+    def setup(self):
+        self.linear = nn.Dense(3+3+self.num_confidence_values)
+
+    def __call__(self, h_V, h_E, topologies):
+        pass
+
+    def backbone_update_with_confidence(self, pair_embeddings):
+        """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
+        embedding, a linear layer predicts a vector for the translation and three additional components that define the
+        Euler axis. See AlphaFold Supplementary information section 1.8.3, Algorithm 23 "Backbone update".
+        This function is written for a single example.
+        Args:
+            pair_embeddings: [N, K, C]
+        Returns:
+        """
+        output = self.linear(pair_embeddings)  # [N,K, 3+3+self.num_confidence_values]
+
+    def _get_rotation_matrix(self, b, c, d):
+        # Converts quaternion to rotation matrix
+        pass
+
 # Backbone solver
