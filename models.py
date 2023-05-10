@@ -46,15 +46,7 @@ def gather_nodes(features, topology) -> jnp.array:
     Returns: an array of shape [N, K, C] where the elements are gathered from features
              [N,C] at topology [N,K] => node features [N,K,C]
     (unit-tested)"""
-    N, C = features.shape
-    _, K = topology.shape
-    # Flatten and broadcast [N,K] => [NK, 1] => [NK,C]
-    neighbours_flat = jnp.reshape(topology, (N * K, 1))
-    neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N * K, C))
-    # Take and repack
-    neighbour_features = jnp.take_along_axis(features, indices=neighbours_flat, axis=0)
-    neighbour_features = jnp.reshape(neighbour_features, (N, K, C))
-    return neighbour_features
+    return jnp.take(features, topology, axis=0)
 
 
 def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
@@ -427,6 +419,73 @@ class PairwiseGeometryPrediction(nn.Module):
                          [(2*b*d - 2*a*c), (2*c*d + 2*a*b), (a**2 - b**2 - c**2 + d**2)]])
         return rot
 
+
 # Backbone solver
 class BackboneSolver(nn.Module):
-    pass
+    """Implements the Backbone solver that predicts equivariant consensus structure from weighted inter-residue
+    geometries. The BackboneGNN predicts a set of inter-residue geometries T_ij together with confidences w_ij. This
+    module solves either fully or approximately for the consensus structure that best satisfies this set of pairwise
+    predictions."""
+    num_iterations: int = 3  # for backbone network B, num_iterations = 10
+    # uncertainty model - isotropic (Backbone Net A) or decoupled (2-parameter, Backbone Net B)
+
+    @nn.compact
+    def __call__(self, transforms, pairwise_geometries) -> Transforms:
+        """
+        Args:
+            transforms: a Transforms object
+            pairwise_geometries: a pairwise geometries object (batched arrays within)
+        Returns:
+        """
+        for _ in range(self.num_iterations):
+            # solve backbone
+            pass
+
+        return Transforms(None, None)
+
+    @staticmethod
+    def update_frame(self, transforms, pairwise_geometries, topology):
+        """Updates the frame of a single residue i given the pairwise geometries of its neighbours.
+        Note: this method will be jax.vmap transformed for the batch dimension.
+        Args:
+
+        """
+        # Extract initial transforms
+        t_ij = pairwise_geometries.transforms.translations  # [N, K, 3]
+        O_ij = pairwise_geometries.transforms.orientations  # [N, K, 3, 3]
+        t_i = transforms.translations  # current translation of frame [N, 3]
+        O_i = transforms.orientations  # current orientation of frame [N, 3, 3]
+
+        # Normalize confidences
+        w_ij = pairwise_geometries.confidences  # [N, K, 1], isotropic confidence
+        p_ij = w_ij / jnp.sum(w_ij, axis=-2, keepdims=True)  # sum over j
+
+        # Compute T_ji, including t_ji and O_ji
+        O_ji = None
+        # Perform confidence weighted sums according to formula
+        # Project rotation matrices with SVD
+        # Return updated transforms
+        pass
+
+    @staticmethod
+    def _gather_orientations(orientations, topology) -> jnp.array:
+        """Extracts relevant orientations from "orientations" given graph topology. This function is
+        written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+        This function is modelled after gather_nodes (see above).
+        Orientations [N,3,3] at Neighbor indices [N,K] => [N,K,3,3]
+        Args:
+            orientations: an array of shape [N, C] where N is the number of nodes and C is the number of channels
+            topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives
+            a list of K edges where the elements encode the indices of the jth node
+        Returns: an array of shape [N, K, 3, 3] where the elements are gathered from orientations
+                 [N,3,3] at topology [N,K] => node features [N,K,3,3]
+        """
+        N, K = topology.shape
+        # Flatten and broadcast [N,K] => [NK, 1] => [NK,C]
+        neighbours_flat = jnp.reshape(topology, (N * K, 1))
+        neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N * K, 3, 3))
+        # Take and repack
+        neighbour_orientations = jnp.take_along_axis(orientations, indices=neighbours_flat, axis=0)
+        neighbour_orientations = jnp.reshape(neighbour_orientations, (N, K, 3, 3))
+        return neighbour_orientations
+
