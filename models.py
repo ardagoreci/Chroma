@@ -13,7 +13,7 @@ import flax
 import jax.numpy as jnp
 import jax
 from flax import linen as nn
-from typing import Tuple
+from typing import Tuple, NamedTuple
 from protein_graph import sample_random_graph
 
 
@@ -342,6 +342,32 @@ class BackboneGNN(nn.Module):
 
 
 # Inter-residue Geometry Prediction
+class AnisotropicConfidence(NamedTuple):
+    """A more sophisticated anisotropic confidence that is parameterized by separating the precision term w of
+    isotropic confidence into three components: rotational precision and two components for position: radial distance
+    precision and lateral precision. The radial and lateral precision are eigenvalues of the full 3x3 precision
+    matrix P_ij for translation errors. For details, see section E.2 in Chroma Paper.
+    rotational_precision: [..., 1]
+    radial_distance_precision: [..., 1]
+    lateral_precision: [..., 1]
+    """
+    rotational_precision: jnp.array
+    radial_distance_precision: jnp.array
+    lateral_precision: jnp.array
+
+
+class Transforms(NamedTuple):
+    """A residue wise transform that stores a [..., 3, 3] orientation matrix and a [..., 3] translation vector."""
+    translations: jnp.array
+    orientations: jnp.array
+
+
+class PairwiseGeometries(NamedTuple):
+    """A pairwise geometry that stores Transform objects and associated confidence values."""
+    transforms: Transforms
+    confidences: jnp.array  # this will be changed when switching to Backbone Network B
+
+
 # noinspection PyAttributeOutsideInit
 class PairwiseGeometryPrediction(nn.Module):
     """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given node
@@ -352,10 +378,10 @@ class PairwiseGeometryPrediction(nn.Module):
         self.linear = nn.Dense(3+3+self.num_confidence_values)
 
     def __call__(self, h_V, h_E):
-        pairwise_transforms, pairwise_confidences = jax.vmap(self.backbone_update_with_confidence)(h_E)
-        return pairwise_transforms, pairwise_confidences
+        batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
+        return batch_pairwise_geometries
 
-    def backbone_update_with_confidence(self, pair_embeddings) -> Tuple[jnp.array, jnp.array, jnp.array]:
+    def backbone_update_with_confidence(self, pair_embeddings) -> PairwiseGeometries:
         """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
         embedding, a linear layer predicts a vector for the translation and three additional components that define the
         Euler axis. See AlphaFold Supplementary information section 1.8.3, Algorithm 23 "Backbone update".
@@ -376,7 +402,10 @@ class PairwiseGeometryPrediction(nn.Module):
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
         # K dimensions are batch dim to vectorize function with jax.vmap
         rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values+3:])
-        return (translations, rotations), confidences
+        # Return pairwise geometries
+        transforms = Transforms(translations=translations, orientations=rotations)
+        pairwise_geometries = PairwiseGeometries(transforms=transforms, confidences=confidences)
+        return pairwise_geometries
 
     @staticmethod
     def _get_rotation_matrix(array):
@@ -399,3 +428,5 @@ class PairwiseGeometryPrediction(nn.Module):
         return rot
 
 # Backbone solver
+class BackboneSolver(nn.Module):
+    pass

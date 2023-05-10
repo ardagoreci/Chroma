@@ -1,17 +1,55 @@
 """This file implements utility functions that are useful when interacting with protein data."""
 
 # Dependencies
+import jax
 from Bio.PDB import *
 import numpy as np
+import jax.numpy as jnp
 import py3Dmol
+from models import Transforms
 
-parser = PDBParser()  # no need to instantiate this at every method call.
+
+def structure_to_transforms(coordinates) -> Transforms:
+    """Constructs frames using the position of three atoms from the ground truth PDB structures using a Gram-Schmidt
+    process. Note: the translation vector is assigned to the centre atom. Following AlphaFold, it uses N as x1, Ca as x2
+    and C as x3 for backbone frames, so the frame has Ca at the centre.
+    For details, see AlphaFold Supplementary Information, Alg. 21.
+    Args:
+        coordinates: structure coordinates of shape [B, N, 4, 3]
+    Returns: a Transforms object storing the residue transforms, each with a translation vector and a rotation matrix.
+    """
+
+    def _single_rigid_from_3_points(x1, x2, x3) -> Transforms:
+        """Single example implementation fo rigid_from_3_points. The implementation is easier and less bug-prone if
+        written for a single example and then jax.vmap transformed.
+        Args:
+            x1: coordinate array of shape [3,]
+            x2: coordinate array of shape [3,]
+            x3: coordinate array of shape [3,]
+        Returns: a Transforms object storing the residue transforms, each with a translation vector and a rotation
+                 matrix.
+        """
+        v1 = x3 - x2
+        v2 = x1 - x2
+        e1 = v1 / jnp.linalg.norm(v1)
+        u2 = v2 - (e1 * jnp.dot(e1.T, v2))
+        e2 = u2 / jnp.linalg.norm(u2)
+        e3 = jnp.cross(e1, e2)
+        R = jnp.stack([e1, e2, e3], axis=0)
+        t = x2  # translation atom assigned to center atom x2
+        return Transforms(t, R)
+
+    N = coordinates[:, :, 0, :]
+    Ca = coordinates[:, :, 1, :]
+    C = coordinates[:, :, 2, :]
+    batch_rigid_from_3_points_fn = jax.vmap(jax.vmap(_single_rigid_from_3_points))
+    return batch_rigid_from_3_points_fn(N, Ca, C)
 
 
-def parse_pdb_coordinates(directory):
+def parse_pdb_coordinates(parser, directory):
     """This method reads a clean PDB file and returns an array of shape [N, b, 3] where N is the number of residues
     and b is the number of backbone atoms per residue. If there are unclean pdb files with ligands etc.,
-    it will produce an error.
+    it will produce an error. parser is a PDBParser object.
     (unit-tested)"""
     structure = parser.get_structure("protein", directory)
     model = structure[0]  # access the first model
@@ -27,7 +65,8 @@ def parse_pdb_coordinates(directory):
     return np.stack(coordinates, axis=0)
 
 
-def visualize_connections(pdb_path, residue_pairs, cylinder_color='red', sphere_color='red', radius=0.2, sphere_radius=0.8):
+def visualize_connections(pdb_path, residue_pairs, cylinder_color='red', sphere_color='red', radius=0.2,
+                          sphere_radius=0.8):
     """A method that visualizes connections between residue pairs given residue pairs and a pdb file.
     Args:
         pdb_path: the path for the pdb file
