@@ -443,61 +443,7 @@ class BackboneSolver(nn.Module):
         Returns:
         """
         batch_update_frame = jax.vmap(BackboneSolver.update_frame)
-        batch_update_pairwise_geometries = jax.vmap(BackboneSolver.update_pairwise_geometries)
-        confidences = pairwise_geometries.confidences  # this is not changed in iterations
-        for _ in range(self.num_iterations):
-            updated_transforms = batch_update_frame(transforms, pairwise_geometries, topology)
-            pairwise_transforms = batch_update_pairwise_geometries(transforms, updated_transforms, topology)
-            pairwise_geometries = PairwiseGeometries(pairwise_transforms, confidences)
-            transforms = updated_transforms
-        return transforms
-
-    @staticmethod
-    def update_pairwise_geometries(pairwise_geometries,
-                                   current_transform,
-                                   updated_transforms,
-                                   topology) -> PairwiseGeometries:
-        """Updates pairwise geometries given the current transform and updated transforms.
-         After every iteration, the pairwise geometries have to be updated for a parallel coordinate descent algorithm.
-         The new pairwise geometry is T_ij' where j' is the new position of every neighbour.
-         TODO: this method does not work yet!
-         """
-        # Compute T_j(-1)
-        #   Gather current transforms of edge frames
-        t_j = gather_nodes(current_transform.translations, topology)  # [N, K, 3]
-        O_j = gather_nodes(current_transform.orientations, topology)  # [N, K, 3, 3]
-        invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
-        inverse_t_j, inverse_O_j = invert_transforms_fn(t_j, O_j)
-        inverse_T_j = Transforms(inverse_t_j, inverse_O_j)
-
-        # Compose T_j(-1) with T_j'
-        compose = jax.vmap(jax.vmap(BackboneSolver.compose_transforms))
-
-        t_j_prime = gather_nodes(updated_transforms.translations, topology)
-        O_j_prime = gather_nodes(updated_transforms.orientations, topology)
-        T_j_prime = Transforms(t_j_prime, O_j_prime)
-        T_jj_prime = compose(inverse_T_j, T_j_prime)
-
-        pairwise_transforms = pairwise_geometries.transforms
-        T_ij_prime = compose(pairwise_transforms, T_jj_prime)
-
-        # Compute T(i', i)
-        t_i_prime = updated_transforms.translations  # [N, 3]
-        O_i_prime = updated_transforms.orientations  # [N, 3, 3]
-        # Broadcast
-        N, K = topology.shape
-        t_i_prime = jnp.broadcast_to(jnp.expand_dims(t_i_prime, axis=1), shape=(N, K, 3))
-        O_i_prime = jnp.broadcast_to(jnp.expand_dims(O_i_prime, axis=1), shape=(N, K, 3, 3))
-        t_i = jnp.broadcast_to(jnp.expand_dims(current_transform.translations, axis=1), shape=(N, K, 3))
-        O_i = jnp.broadcast_to(jnp.expand_dims(current_transform.orientations, axis=1), shape=(N, K, 3, 3))
-        current_transform = Transforms(t_i, O_i)
-
-        inverse_t_i_prime, inverse_O_i_prime = invert_transforms_fn(t_i_prime, O_i_prime)
-        inverse_T_i_prime = Transforms(inverse_t_i_prime, inverse_O_i_prime)
-        T_i_prime_i = compose(inverse_T_i_prime, current_transform)
-
-        updated_pairwise_transforms = compose(T_i_prime_i, T_ij_prime)
-        return PairwiseGeometries(updated_pairwise_transforms, pairwise_geometries.confidences)
+        return batch_update_frame(transforms, pairwise_geometries, topology)
 
     @staticmethod
     def update_frames(current_transforms, pairwise_geometries, topology) -> Transforms:
