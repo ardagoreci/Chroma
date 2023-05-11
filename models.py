@@ -409,8 +409,8 @@ class PairwiseGeometryPrediction(nn.Module):
         Returns: a rotation matrix of shape [3, 3] computed from the quaternion. This procedure guarantees a valid
                  normalized quaternion and favours small rotations over large rotations.
 
-        (unit-tested, the angles make sense and definitely have a relationship with SciPy quaternion matrix conversion,
-        for a learning system, it should not be a problem.)"""
+        (unit-tested, the angles make sense and definitely have a relationship with SciPy quaternion matrix conversion.
+        For a learning system, it should not be a problem.)"""
         b, c, d = array[0], array[1], array[2]
         quaternion = jnp.array([1, b, c, d])  # the first component of non-unit quaternion is fixed to 1.
         (a, b, c, d) = quaternion / jnp.sqrt(jnp.sum(quaternion**2))
@@ -430,25 +430,28 @@ class BackboneSolver(nn.Module):
     # uncertainty model - isotropic (Backbone Net A) or decoupled (2-parameter, Backbone Net B)
 
     @nn.compact
-    def __call__(self, transforms, pairwise_geometries) -> Transforms:
+    def __call__(self, transforms, pairwise_geometries, topology) -> Transforms:
         """
         Args:
             transforms: a Transforms object
             pairwise_geometries: a pairwise geometries object (batched arrays within)
         Returns:
         """
+        batch_update_frame = jax.vmap(BackboneSolver.update_frame)
         for _ in range(self.num_iterations):
-            # solve backbone
-            pass
-
-        return Transforms(None, None)
+            transforms = batch_update_frame(transforms, pairwise_geometries, topology)
+        return transforms
 
     @staticmethod
-    def update_frame(self, transforms, pairwise_geometries, topology):
+    def update_frame(transforms, pairwise_geometries, topology) -> Transforms:
         """Updates the frame of a single residue i given the pairwise geometries of its neighbours.
+        The method notation is written to closely follow the notation in the Chroma Paper, section E.2.
         Note: this method will be jax.vmap transformed for the batch dimension.
         Args:
-
+            transforms: Transforms object for the current transforms describing the pose
+            pairwise_geometries: a PairwiseGeometries object predicted by the network
+            topology: graph topology of shape [N, K]
+        Returns: updated transforms
         """
         # Extract initial transforms
         t_ij = pairwise_geometries.transforms.translations  # [N, K, 3]
@@ -456,36 +459,63 @@ class BackboneSolver(nn.Module):
         t_i = transforms.translations  # current translation of frame [N, 3]
         O_i = transforms.orientations  # current orientation of frame [N, 3, 3]
 
+        # Gather current transforms of edge frames
+        O_j = gather_nodes(O_i, topology)  # [N, K, 3, 3]
+        t_j = gather_nodes(t_i, topology)  # [N, K, 3]
+
         # Normalize confidences
         w_ij = pairwise_geometries.confidences  # [N, K, 1], isotropic confidence
-        p_ij = w_ij / jnp.sum(w_ij, axis=-2, keepdims=True)  # sum over j
+        p_ij = w_ij / jnp.sum(w_ij, axis=-2, keepdims=True)  # sum over j, p_ij.shape == [N, K, 1]
 
         # Compute T_ji, including t_ji and O_ji
-        O_ji = None
+        invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
+        t_ji, O_ji = invert_transforms_fn(t_ij, O_ij)  # T_ij => T_ji
+
         # Perform confidence weighted sums according to formula
+        dot_fn = jax.vmap(jax.vmap(jnp.dot))  # a function that performs transform-wise dot (for O and t)
+        translations = jnp.sum(p_ij*(t_j + dot_fn(O_j, t_ji)), axis=-2)  # confidence weighted sum
+        orientation_sum = jnp.sum(p_ij*(dot_fn(O_j, O_ji)))
+
         # Project rotation matrices with SVD
+        projector = jax.vmap(BackboneSolver.proj_with_svd)  # acts on [N, 3, 3]
+        orientations = projector(orientation_sum)
+
         # Return updated transforms
-        pass
+        return Transforms(translations, orientations)
 
     @staticmethod
-    def _gather_orientations(orientations, topology) -> jnp.array:
-        """Extracts relevant orientations from "orientations" given graph topology. This function is
-        written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
-        This function is modelled after gather_nodes (see above).
-        Orientations [N,3,3] at Neighbor indices [N,K] => [N,K,3,3]
+    def invert_transform(t, O) -> Tuple[jnp.array, jnp.array]:
+        """Computes the inverse of a given transform as T(-1) = (dot(-O(-1), t), O(-1)) where O(-1) is the inverse of
+        the orientation. This method can also be used to compute the inverses of relative transformations as T_ba =
+        T_ab(-1).
         Args:
-            orientations: an array of shape [N, C] where N is the number of nodes and C is the number of channels
-            topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives
-            a list of K edges where the elements encode the indices of the jth node
-        Returns: an array of shape [N, K, 3, 3] where the elements are gathered from orientations
-                 [N,3,3] at topology [N,K] => node features [N,K,3,3]
+            t: the translation vector of shape [3,]
+            O: the rotation matrix of shape [3, 3]
+        Returns: inverted translation and rotation arrays
+        (unit-tested)
         """
-        N, K = topology.shape
-        # Flatten and broadcast [N,K] => [NK, 1] => [NK,C]
-        neighbours_flat = jnp.reshape(topology, (N * K, 1))
-        neighbours_flat = jnp.broadcast_to(neighbours_flat, shape=(N * K, 3, 3))
-        # Take and repack
-        neighbour_orientations = jnp.take_along_axis(orientations, indices=neighbours_flat, axis=0)
-        neighbour_orientations = jnp.reshape(neighbour_orientations, (N, K, 3, 3))
-        return neighbour_orientations
+        new_t = - jnp.dot(O.T, t)
+        new_O = O.T
+        return new_t, new_O
 
+    @staticmethod
+    def proj_with_svd(matrix):
+        """Implements a projection operator with singular value decomposition (SVD) as in the Kabsch algorithm for
+        optimal RMSD decomposition. For details, see: https://en.wikipedia.org/wiki/Kabsch_algorithm
+        This function is written for a single example.
+        Args:
+            matrix: a matrix of size [3, 3]
+        Returns: a rotation matrix of shape [3, 3] derived from 'matrix' via SVD
+        """
+        u, s, vh = jnp.linalg.svd(matrix)
+        V = vh.T
+        # Decide whether we need to correct our rotation matrix to ensure a right-handed coordinate system
+        d = jnp.sign(jnp.linalg.det(jnp.matmul(V, u.T)))
+
+        # Compute optimal rotation matrix
+        intermediate = jnp.array([[1, 0, 0],
+                                 [0, 1, 0],
+                                 [0, 0, d]])
+        intermediate = jnp.matmul(intermediate, u.T)
+        rot = jnp.matmul(V, intermediate)
+        return rot
