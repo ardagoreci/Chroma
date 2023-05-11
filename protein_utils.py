@@ -12,12 +12,13 @@ from models import Transforms
 def structure_to_transforms(coordinates) -> Transforms:
     """Constructs frames using the position of three atoms from the ground truth PDB structures using a Gram-Schmidt
     process. Note: the translation vector is assigned to the centre atom. Following AlphaFold, it uses N as x1, Ca as x2
-    and C as x3 for backbone frames, so the frame has Ca at the centre.
+    and C as x3 for backbone frames, so the frame has Ca at the centre. This function is written without the batch dim,
+    it should be jax.vmap transformed if used with batch dimension.
     For details, see AlphaFold Supplementary Information, Alg. 21.
     Args:
         coordinates: structure coordinates of shape [B, N, 4, 3]
     Returns: a Transforms object storing the residue transforms, each with a translation vector and a rotation matrix.
-    """
+    (unit-tested)"""
 
     def _single_rigid_from_3_points(x1, x2, x3) -> Transforms:
         """Single example implementation fo rigid_from_3_points. The implementation is easier and less bug-prone if
@@ -32,17 +33,17 @@ def structure_to_transforms(coordinates) -> Transforms:
         v1 = x3 - x2
         v2 = x1 - x2
         e1 = v1 / jnp.linalg.norm(v1)
-        u2 = v2 - (e1 * jnp.dot(e1.T, v2))
+        u2 = v2 - (e1 * jnp.dot(e1, v2))
         e2 = u2 / jnp.linalg.norm(u2)
         e3 = jnp.cross(e1, e2)
         R = jnp.stack([e1, e2, e3], axis=0)
         t = x2  # translation atom assigned to center atom x2
         return Transforms(t, R)
 
-    N = coordinates[:, :, 0, :]
-    Ca = coordinates[:, :, 1, :]
-    C = coordinates[:, :, 2, :]
-    batch_rigid_from_3_points_fn = jax.vmap(jax.vmap(_single_rigid_from_3_points))
+    N = coordinates[:, 0, :]
+    Ca = coordinates[:, 1, :]
+    C = coordinates[:, 2, :]
+    batch_rigid_from_3_points_fn = jax.vmap(_single_rigid_from_3_points)
     return batch_rigid_from_3_points_fn(N, Ca, C)
 
 

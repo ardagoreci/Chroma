@@ -7,6 +7,11 @@ The main components include:
     4. Inter-residue Geometry Prediction
     5. Backbone Solver
 This module includes all components that are trainable.
+
+TODO: sort out the dataclasses/NamedTuple situation so that there is a Transform class that I can define the compose
+ and invert methods for and makes everything sit in their proper place. This will likely simplify the code of
+ BackboneSolver and PairwiseInterresidueGeometry prediction. For now, I will leave them as they are because I
+ unit-tested most of them and I don't want to break things before they start working.
 """
 # Dependencies
 import flax
@@ -438,26 +443,78 @@ class BackboneSolver(nn.Module):
         Returns:
         """
         batch_update_frame = jax.vmap(BackboneSolver.update_frame)
+        batch_update_pairwise_geometries = jax.vmap(BackboneSolver.update_pairwise_geometries)
+        confidences = pairwise_geometries.confidences  # this is not changed in iterations
         for _ in range(self.num_iterations):
-            transforms = batch_update_frame(transforms, pairwise_geometries, topology)
+            updated_transforms = batch_update_frame(transforms, pairwise_geometries, topology)
+            pairwise_transforms = batch_update_pairwise_geometries(transforms, updated_transforms, topology)
+            pairwise_geometries = PairwiseGeometries(pairwise_transforms, confidences)
+            transforms = updated_transforms
         return transforms
 
     @staticmethod
-    def update_frame(transforms, pairwise_geometries, topology) -> Transforms:
+    def update_pairwise_geometries(pairwise_geometries,
+                                   current_transform,
+                                   updated_transforms,
+                                   topology) -> PairwiseGeometries:
+        """Updates pairwise geometries given the current transform and updated transforms.
+         After every iteration, the pairwise geometries have to be updated for a parallel coordinate descent algorithm.
+         The new pairwise geometry is T_ij' where j' is the new position of every neighbour.
+         TODO: this method does not work yet!
+         """
+        # Compute T_j(-1)
+        #   Gather current transforms of edge frames
+        t_j = gather_nodes(current_transform.translations, topology)  # [N, K, 3]
+        O_j = gather_nodes(current_transform.orientations, topology)  # [N, K, 3, 3]
+        invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
+        inverse_t_j, inverse_O_j = invert_transforms_fn(t_j, O_j)
+        inverse_T_j = Transforms(inverse_t_j, inverse_O_j)
+
+        # Compose T_j(-1) with T_j'
+        compose = jax.vmap(jax.vmap(BackboneSolver.compose_transforms))
+
+        t_j_prime = gather_nodes(updated_transforms.translations, topology)
+        O_j_prime = gather_nodes(updated_transforms.orientations, topology)
+        T_j_prime = Transforms(t_j_prime, O_j_prime)
+        T_jj_prime = compose(inverse_T_j, T_j_prime)
+
+        pairwise_transforms = pairwise_geometries.transforms
+        T_ij_prime = compose(pairwise_transforms, T_jj_prime)
+
+        # Compute T(i', i)
+        t_i_prime = updated_transforms.translations  # [N, 3]
+        O_i_prime = updated_transforms.orientations  # [N, 3, 3]
+        # Broadcast
+        N, K = topology.shape
+        t_i_prime = jnp.broadcast_to(jnp.expand_dims(t_i_prime, axis=1), shape=(N, K, 3))
+        O_i_prime = jnp.broadcast_to(jnp.expand_dims(O_i_prime, axis=1), shape=(N, K, 3, 3))
+        t_i = jnp.broadcast_to(jnp.expand_dims(current_transform.translations, axis=1), shape=(N, K, 3))
+        O_i = jnp.broadcast_to(jnp.expand_dims(current_transform.orientations, axis=1), shape=(N, K, 3, 3))
+        current_transform = Transforms(t_i, O_i)
+
+        inverse_t_i_prime, inverse_O_i_prime = invert_transforms_fn(t_i_prime, O_i_prime)
+        inverse_T_i_prime = Transforms(inverse_t_i_prime, inverse_O_i_prime)
+        T_i_prime_i = compose(inverse_T_i_prime, current_transform)
+
+        updated_pairwise_transforms = compose(T_i_prime_i, T_ij_prime)
+        return PairwiseGeometries(updated_pairwise_transforms, pairwise_geometries.confidences)
+
+    @staticmethod
+    def update_frames(current_transforms, pairwise_geometries, topology) -> Transforms:
         """Updates the frame of a single residue i given the pairwise geometries of its neighbours.
         The method notation is written to closely follow the notation in the Chroma Paper, section E.2.
         Note: this method will be jax.vmap transformed for the batch dimension.
         Args:
-            transforms: Transforms object for the current transforms describing the pose
+            current_transforms: Transforms object for the current transforms describing the pose
             pairwise_geometries: a PairwiseGeometries object predicted by the network
             topology: graph topology of shape [N, K]
         Returns: updated transforms
-        """
+        (unit-tested)"""
         # Extract initial transforms
         t_ij = pairwise_geometries.transforms.translations  # [N, K, 3]
         O_ij = pairwise_geometries.transforms.orientations  # [N, K, 3, 3]
-        t_i = transforms.translations  # current translation of frame [N, 3]
-        O_i = transforms.orientations  # current orientation of frame [N, 3, 3]
+        t_i = current_transforms.translations  # current translation of frame [N, 3]
+        O_i = current_transforms.orientations  # current orientation of frame [N, 3, 3]
 
         # Gather current transforms of edge frames
         O_j = gather_nodes(O_i, topology)  # [N, K, 3, 3]
@@ -465,7 +522,7 @@ class BackboneSolver(nn.Module):
 
         # Normalize confidences
         w_ij = pairwise_geometries.confidences  # [N, K, 1], isotropic confidence
-        p_ij = w_ij / jnp.sum(w_ij, axis=-2, keepdims=True)  # sum over j, p_ij.shape == [N, K, 1]
+        p_ij = w_ij / jnp.sum(w_ij, axis=1, keepdims=True)  # sum over j, p_ij.shape == [N, K, 1]
 
         # Compute T_ji, including t_ji and O_ji
         invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
@@ -473,8 +530,9 @@ class BackboneSolver(nn.Module):
 
         # Perform confidence weighted sums according to formula
         dot_fn = jax.vmap(jax.vmap(jnp.dot))  # a function that performs transform-wise dot (for O and t)
-        translations = jnp.sum(p_ij*(t_j + dot_fn(O_j, t_ji)), axis=-2)  # confidence weighted sum
-        orientation_sum = jnp.sum(p_ij*(dot_fn(O_j, O_ji)))
+        translations = jnp.sum(p_ij*(t_j + dot_fn(O_j, t_ji)), axis=1)  # confidence weighted sum over edges
+        p_ij = jnp.expand_dims(p_ij, axis=-1)  # [N, K, 1] => [N, K, 1, 1] for proper broadcasting with [N, K, 3, 3]
+        orientation_sum = jnp.sum(p_ij*(dot_fn(O_j, O_ji)), axis=1)  # confidence weighted sum over edges
 
         # Project rotation matrices with SVD
         projector = jax.vmap(BackboneSolver.proj_with_svd)  # acts on [N, 3, 3]
@@ -506,7 +564,7 @@ class BackboneSolver(nn.Module):
         Args:
             matrix: a matrix of size [3, 3]
         Returns: a rotation matrix of shape [3, 3] derived from 'matrix' via SVD
-        """
+        (unit-tested)"""
         u, s, vh = jnp.linalg.svd(matrix)
         V = vh.T
         # Decide whether we need to correct our rotation matrix to ensure a right-handed coordinate system
@@ -519,3 +577,22 @@ class BackboneSolver(nn.Module):
         intermediate = jnp.matmul(intermediate, u.T)
         rot = jnp.matmul(V, intermediate)
         return rot
+
+    @staticmethod
+    def compose_transforms(transform_a, transform_b) -> Transforms:
+        """Composes two transforms. This method needs to be jax.vmap transformed when the Transforms object passed
+        are of higher rank.
+        Args:
+            transform_a: a Transforms object with arrays of shape [3,] and [3, 3]
+            transform_b: a Transforms object with arrays of shape [3,] and [3, 3]
+
+        (unit-tested)"""
+        t_a = transform_a.translations
+        O_a = transform_a.orientations
+        t_b = transform_b.translations
+        O_b = transform_b.orientations
+
+        translation = t_a + jnp.dot(O_a, t_b)
+        orientation = jnp.dot(O_a, O_b)
+        return Transforms(translation, orientation)
+
