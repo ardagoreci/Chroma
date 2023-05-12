@@ -440,7 +440,8 @@ class BackboneSolver(nn.Module):
         Args:
             transforms: a Transforms object
             pairwise_geometries: a pairwise geometries object (batched arrays within)
-        Returns:
+        Returns: updated transforms
+        TODO: implement iteration
         """
         batch_update_frame = jax.vmap(BackboneSolver.update_frame)
         return batch_update_frame(transforms, pairwise_geometries, topology)

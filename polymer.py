@@ -38,7 +38,7 @@ def diffuse(key, coordinates, timestep, rg_confined=True, mode='pile-of-globs'):
         # Scaling a and computing b
         a = 3.8 / scale_norm  # 'segment length' = 3.8 Angstroms, which becomes scaled with norm of scale
         b = compute_b(N, a, scale_norm)
-        rz = rg_confined_covariance(key, x0, a, b)
+        rz = rg_confined_covariance(key, x0, a, b)  # (N, 1, 3)
     else:  # use ideal-chain diffusion
         radius_g = compute_radius_of_gyration(x0)
         gamma = math.sqrt((radius_g ** 2) * 2 / N)
@@ -53,7 +53,7 @@ def diffuse(key, coordinates, timestep, rg_confined=True, mode='pile-of-globs'):
         pass
 
     # Coordinates back to Angstroms
-    diffused_coordinates = x_t*scale + mean
+    diffused_coordinates = x_t * scale + mean
     return diffused_coordinates.reshape((N, B, 3))
 
 
@@ -68,12 +68,29 @@ def ideal_covariance(key, x0, gamma, delta):
     (unit-tested)"""
     n_atoms, _ = x0.shape
     z = jax.random.normal(key, shape=x0.shape)  # z ~ N(0, I)
-    cu_z = gamma * jnp.cumsum(z, axis=0)  # cumulative z
+    cu_z = gamma * jnp.cumsum(z, axis=0)  # cumulative z, TODO: this might be a subtle implementation error
     # cu_z.shape == (n_atoms*3,)
     constant_terms = delta * cu_z[0] - (1 / n_atoms) * (jnp.sum(cu_z))
     return cu_z + constant_terms  # jnp.reshape(cu_z, x0.shape) + constant_terms
 
 
+def ideal_covariance_v2(key, n_res, gamma, delta):
+    """This method computes the matmul(R, z) for the ideal chain covariance model. For the formula, see section C.2
+    'Covariance model #1: Ideal Chain' in Chroma Paper.
+    Args:
+        key: Jax random key
+        n_res: number of residues in polymer
+        gamma: length scale of the chain
+        delta: amount of allowed translational noise about the origin
+    (unit-tested)"""
+    z = jax.random.normal(key, shape=(n_res, 3))  # z ~ N(0, I)
+    x_hat = gamma * jnp.cumsum(z, axis=0)  # cumulative z, shape == (n_res, 3)
+    rz = x_hat + delta * x_hat[0] - jnp.sum(x_hat) / n_res
+    rz = jnp.reshape(rz, (n_res, 1, 3))
+    return rz
+
+
+@jax.jit
 def rg_confined_covariance(key, x0, a, b):
     """This method computes the matmul(R, z) for the Rg-confined, linear-time Polymer MVNs. For the construction of
     the R matrix, see section C.3 'Covariance model #2: Rg-confined, linear-time Polymer MVNs' in the Chroma Paper.
@@ -87,14 +104,13 @@ def rg_confined_covariance(key, x0, a, b):
     z = jax.random.normal(key, shape=x0.shape)  # z ~ N(0, I)
 
     # Construct Rg confined covariance matrix
-    b_vec = b ** (np.arange(n_atoms))
+    b_vec = b ** (jnp.arange(n_atoms))
 
     rows = []
-    v = 1 / (np.sqrt(1 - b ** 2))
+    v = 1 / (jnp.sqrt(1 - b ** 2))
     for i in range(len(b_vec)):
-        row = np.flip(b_vec[:len(b_vec) - i])
-        row[0] = row[0] * v  # Multiplying v with the first element
-        # Switch to Jax Numpy arrays from Numpy
+        row = jnp.flip(b_vec[:len(b_vec) - i])
+        row = row.at[0].set(row[0] * v)  # Multiplying v with the first element, jnp.at for updates
         padded_row = jnp.pad(row, (0, i))
         rows.append(padded_row)
     rows.reverse()
@@ -114,23 +130,25 @@ def log_snr_schedule(timestep):
     return jnp.exp(-jnp.e ** (-4) - 10 * (timestep ** 2))
 
 
-def compute_b(n_res, a, scale_norm):
+def compute_b(n_atoms, a, scale_norm):
     """This method computes b given the global scaling factor a. See section C.3.2 in Chroma Paper for the derivation
     of the formula. The derivation makes a power law approximation for the radius of gyration in the form r*(N**v)
     where r is a prefactor and v is the Flory coefficient. The values of r and v are taken from Tanner (2016) in the
     paper 'Empirical power laws for the radii of gyration of protein oligomers.' The experimentally determined values
     are: prefactor r = 2 Angstroms (0.2 nanometers) and v = 0.4. Tanner (2016) showed that the v of oligomers was
-    almost identical to that of monomers which is 0.4
+    almost identical to that of monomers which is 0.4. Since this function uses n_atoms as its input, the r is rescaled
+    to 1.148698355.
     Args:
-        n_res: number of residues in the protein (important)
+        n_atoms: number of atoms in the protein
         a: global scale factor that determines the 'segment length' of the polymer
         scale_norm: norm for the standard deviations of xyz axes
     """
     # (See Tanner, 2016)
-    r = 2.0 / scale_norm  # r is an experimentally determined prefactor with value 2.0 Angstroms
+    r = 1.148698355 / scale_norm  # r is an experimentally determined prefactor with value 2.0 Angstroms but is
+    # scaled to this value when n_atoms are used
     v = 0.4  # narrow range between 0.38-0.40, taken to be 0.40 (See Tanner, 2016)
-    b_effective = 3 / n_res + (n_res ** (-v)) * math.sqrt(
-        n_res ** (2 * v - 2) * (n_res ** 2 + 9) - ((a ** 2) / (r ** 2)))
+    b_effective = 3 / n_atoms + (n_atoms ** (-v)) * jnp.sqrt(
+        n_atoms ** (2 * v - 2) * (n_atoms ** 2 + 9) - ((a ** 2) / (r ** 2)))
     return b_effective
 
 
