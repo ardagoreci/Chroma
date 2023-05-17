@@ -439,8 +439,8 @@ class BackboneSolver(nn.Module):
         Returns: updated transforms
         TODO: implement iteration
         """
-        batch_update_frame = jax.vmap(BackboneSolver.update_frame)
-        return batch_update_frame(transforms, pairwise_geometries, topology)
+        batch_update_frames = jax.vmap(BackboneSolver.update_frames)
+        return batch_update_frames(transforms, pairwise_geometries, topology)
 
     @staticmethod
     def update_frames(current_transforms, pairwise_geometries, topology) -> Transforms:
