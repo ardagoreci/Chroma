@@ -20,7 +20,7 @@ import jax
 from flax import linen as nn
 from typing import Tuple, NamedTuple
 from protein_graph import sample_random_graph
-from protein_utils import structure_to_transforms, transforms_to_structure
+from protein_utils import structure_to_transforms, transforms_to_structure, Transforms
 
 
 def gather_edges(features, topology) -> jnp.array:
@@ -319,7 +319,7 @@ class BackboneGNN(nn.Module):
         Returns:
         """
         B, N, _, _ = noisy_coordinates.shape
-        keys = jax.random.split(jax.random.PRNGKey(1), num=B)[:, 0]  # keys.shape == (B,2)
+        keys = jax.random.split(key, num=B)  # keys.shape == (B,2)
 
         # Graph sampling
         topologies = jax.vmap(sample_random_graph)(keys, noisy_coordinates)
@@ -352,12 +352,6 @@ class AnisotropicConfidence(NamedTuple):
     rotational_precision: jnp.array
     radial_distance_precision: jnp.array
     lateral_precision: jnp.array
-
-
-class Transforms(NamedTuple):
-    """A residue wise transform that stores a [..., 3, 3] orientation matrix and a [..., 3] translation vector."""
-    translations: jnp.array
-    orientations: jnp.array
 
 
 class PairwiseGeometries(NamedTuple):

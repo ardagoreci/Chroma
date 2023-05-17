@@ -6,7 +6,13 @@ from Bio.PDB import *
 import numpy as np
 import jax.numpy as jnp
 import py3Dmol
-from models import Transforms
+from typing import NamedTuple
+
+
+class Transforms(NamedTuple):
+    """A residue wise transform that stores a [..., 3, 3] orientation matrix and a [..., 3] translation vector."""
+    translations: jnp.array
+    orientations: jnp.array
 
 
 def transforms_to_structure(transforms) -> jnp.array:
