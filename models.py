@@ -20,7 +20,7 @@ import jax
 from flax import linen as nn
 from typing import Tuple, NamedTuple
 from protein_graph import sample_random_graph
-from protein_utils import structure_to_transforms
+from protein_utils import structure_to_transforms, transforms_to_structure
 
 
 def gather_edges(features, topology) -> jnp.array:
@@ -575,5 +575,6 @@ class Chroma(nn.Module):
             num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
 
         # TransformsToStructure (going back to 3D coordinates)
-        denoised_coordinates = None
+        denoised_coordinates = transforms_to_structure(updated_transforms)
+        # TODO: residual updates for all-atom prediction
         return denoised_coordinates

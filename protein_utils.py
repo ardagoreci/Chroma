@@ -9,6 +9,56 @@ import py3Dmol
 from models import Transforms
 
 
+def transforms_to_structure(transforms) -> jnp.array:
+    """Computes the position of backbone atoms given transforms. The coordinates are computed using the ideal bond
+    lengths of Gly with the following values (taken from alphafold.common.residue_constants.py):
+    'GLY': ['N': (-0.572, 1.337, 0.000)],
+           ['CA': (0.000, 0.000, 0.000)],
+           ['C': (1.517, -0.000, -0.000)],
+           ['O': (0.626, 1.062, -0.000)]
+    It is important to note that N, CA, and C are in the backbone rigid group. However, O is in the psi group, so its
+    coordinates vary depending on the torsion angle psi. The Ramachandran plots show that the value of psi is changes
+    depending on the secondary structures alpha helices and beta sheets. For now, I will assume that the O is part of
+    the backbone rigid group. This can then be fixed using residual updates to the final coordinates predicted from
+    node embeddings - the network can easily learn the correct relative position of the O atom depending on the
+    secondary structure context.
+    Empirically, this has a root-mean-square deviation of 1.0 Angstrom from the true coordinates when given perfect
+    transforms. Importantly, the carbon alpha positions are exactly the same.
+    Args:
+        transforms: a Transforms object containing translation of shape [N, 3] and orientations (rotations) of
+        shape [N, 3, 3]
+    Returns:
+        an array of shape [N, 4, 3] encoding the coordinates
+    (unit-tested)"""
+
+    def _frame_to_coor(t, O) -> jnp.array:
+        """
+        Args:
+            t: translation vector of shape [3,]
+            O: orientation vector of shape [3, 3]
+        Returns:
+            a jnp.array of shape [4, 3] encoding the transformed coordinates of N, CA, C, O in that order.
+        """
+        N_at = jnp.array([-0.572, 1.337, 0.000])
+        Ca_at = jnp.array([0.000, 0.000, 0.000])
+        C_at = jnp.array([1.517, -0.000, -0.000])
+        O_at = jnp.array([0.626, 1.062, -0.000])
+
+        coor = jnp.stack([N_at, Ca_at, C_at, O_at], axis=0)
+
+        # Apply orientation transform to each atom
+        def _apply_transform(x):
+            """Applies the rotation 'O' matrix to a [3,] array"""
+            return jnp.matmul(O, x) + t
+        apply_transform_fn = jax.vmap(_apply_transform)
+
+        return apply_transform_fn(coor)
+
+    frames_to_coor_fn = jax.vmap(_frame_to_coor)  # accepts [N,3] translations and [N,3,3] rotations, returns [N,4,3]
+    coordinates = frames_to_coor_fn(transforms.translations, transforms.orientations)
+    return coordinates
+
+
 def structure_to_transforms(coordinates) -> Transforms:
     """Constructs frames using the position of three atoms from the ground truth PDB structures using a Gram-Schmidt
     process. Note: the translation vector is assigned to the centre atom. Following AlphaFold, it uses N as x1, Ca as x2
@@ -43,8 +93,8 @@ def structure_to_transforms(coordinates) -> Transforms:
     N = coordinates[:, 0, :]
     Ca = coordinates[:, 1, :]
     C = coordinates[:, 2, :]
-    batch_rigid_from_3_points_fn = jax.vmap(_single_rigid_from_3_points)
-    return batch_rigid_from_3_points_fn(N, Ca, C)
+    rigid_from_3_points_fn = jax.vmap(_single_rigid_from_3_points)
+    return rigid_from_3_points_fn(N, Ca, C)
 
 
 def parse_pdb_coordinates(parser, directory):
