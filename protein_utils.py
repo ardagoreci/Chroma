@@ -16,7 +16,7 @@ def structure_to_transforms(coordinates) -> Transforms:
     it should be jax.vmap transformed if used with batch dimension.
     For details, see AlphaFold Supplementary Information, Alg. 21.
     Args:
-        coordinates: structure coordinates of shape [B, N, 4, 3]
+        coordinates: structure coordinates of shape [N, 4, 3]
     Returns: a Transforms object storing the residue transforms, each with a translation vector and a rotation matrix.
     (unit-tested)"""
 

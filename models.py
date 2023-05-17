@@ -20,6 +20,7 @@ import jax
 from flax import linen as nn
 from typing import Tuple, NamedTuple
 from protein_graph import sample_random_graph
+from protein_utils import structure_to_transforms
 
 
 def gather_edges(features, topology) -> jnp.array:
@@ -372,7 +373,7 @@ class PairwiseGeometryPrediction(nn.Module):
     num_confidence_values: int = 1  # variable depending on whether isotropic or anisotropic confidences are used
 
     def setup(self):
-        self.linear = nn.Dense(3+3+self.num_confidence_values)
+        self.linear = nn.Dense(3 + 3 + self.num_confidence_values)
 
     def __call__(self, h_V, h_E):
         batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
@@ -394,11 +395,11 @@ class PairwiseGeometryPrediction(nn.Module):
         """
         output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
         confidences = output[:, :, :self.num_confidence_values]
-        translations = output[:, :, self.num_confidence_values:self.num_confidence_values+3]
+        translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3]
         # Compute Rotations
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
         # K dimensions are batch dim to vectorize function with jax.vmap
-        rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values+3:])
+        rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values + 3:])
         # Return pairwise geometries
         transforms = Transforms(translations=translations, orientations=rotations)
         pairwise_geometries = PairwiseGeometries(transforms=transforms, confidences=confidences)
@@ -418,10 +419,10 @@ class PairwiseGeometryPrediction(nn.Module):
         For a learning system, it should not be a problem.)"""
         b, c, d = array[0], array[1], array[2]
         quaternion = jnp.array([1, b, c, d])  # the first component of non-unit quaternion is fixed to 1.
-        (a, b, c, d) = quaternion / jnp.sqrt(jnp.sum(quaternion**2))
-        rot = jnp.array([[(a**2 + b**2 - c**2 - d**2), (2*b*c - 2*a*d), (2*b*d + 2*a*c)],
-                         [(2*b*c + 2*a*d), (a**2 - b**2 + c**2 - d**2), (2*c*d - 2*a*b)],
-                         [(2*b*d - 2*a*c), (2*c*d + 2*a*b), (a**2 - b**2 - c**2 + d**2)]])
+        (a, b, c, d) = quaternion / jnp.sqrt(jnp.sum(quaternion ** 2))
+        rot = jnp.array([[(a ** 2 + b ** 2 - c ** 2 - d ** 2), (2 * b * c - 2 * a * d), (2 * b * d + 2 * a * c)],
+                         [(2 * b * c + 2 * a * d), (a ** 2 - b ** 2 + c ** 2 - d ** 2), (2 * c * d - 2 * a * b)],
+                         [(2 * b * d - 2 * a * c), (2 * c * d + 2 * a * b), (a ** 2 - b ** 2 - c ** 2 + d ** 2)]])
         return rot
 
 
@@ -432,6 +433,7 @@ class BackboneSolver(nn.Module):
     module solves either fully or approximately for the consensus structure that best satisfies this set of pairwise
     predictions."""
     num_iterations: int = 3  # for backbone network B, num_iterations = 10
+
     # uncertainty model - isotropic (Backbone Net A) or decoupled (2-parameter, Backbone Net B)
 
     @nn.compact
@@ -477,9 +479,9 @@ class BackboneSolver(nn.Module):
 
         # Perform confidence weighted sums according to formula
         dot_fn = jax.vmap(jax.vmap(jnp.dot))  # a function that performs transform-wise dot (for O and t)
-        translations = jnp.sum(p_ij*(t_j + dot_fn(O_j, t_ji)), axis=1)  # confidence weighted sum over edges
+        translations = jnp.sum(p_ij * (t_j + dot_fn(O_j, t_ji)), axis=1)  # confidence weighted sum over edges
         p_ij = jnp.expand_dims(p_ij, axis=-1)  # [N, K, 1] => [N, K, 1, 1] for proper broadcasting with [N, K, 3, 3]
-        orientation_sum = jnp.sum(p_ij*(dot_fn(O_j, O_ji)), axis=1)  # confidence weighted sum over edges
+        orientation_sum = jnp.sum(p_ij * (dot_fn(O_j, O_ji)), axis=1)  # confidence weighted sum over edges
 
         # Project rotation matrices with SVD
         projector = jax.vmap(BackboneSolver.proj_with_svd)  # acts on [N, 3, 3]
@@ -519,8 +521,8 @@ class BackboneSolver(nn.Module):
 
         # Compute optimal rotation matrix
         intermediate = jnp.array([[1, 0, 0],
-                                 [0, 1, 0],
-                                 [0, 0, d]])
+                                  [0, 1, 0],
+                                  [0, 0, d]])
         intermediate = jnp.matmul(intermediate, u.T)
         rot = jnp.matmul(V, intermediate)
         return rot
@@ -543,3 +545,35 @@ class BackboneSolver(nn.Module):
         orientation = jnp.dot(O_a, O_b)
         return Transforms(translation, orientation)
 
+
+class Chroma(nn.Module):
+    """The full Chroma network"""
+    node_embedding_dim: int = 512  # the default values are those of Backbone Network A in Chroma
+    edge_embedding_dim: int = 256
+    node_mlp_hidden_dim: int = 512
+    edge_mlp_hidden_dim: int = 128
+    num_gnn_layers: int = 12
+    dropout: float = 0.1  # dropout rate
+    backbone_solver_iterations: int = 1  # this is not implemented for more than 1 yet.
+
+    @nn.compact
+    def __call__(self, key, noisy_coordinates):
+        # BackboneGNN
+        h_V, h_E, topologies = BackboneGNN(node_embedding_dim=self.node_embedding_dim,
+                                           edge_embedding_dim=self.edge_embedding_dim,
+                                           node_mlp_hidden_dim=self.node_mlp_hidden_dim,
+                                           edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
+                                           num_gnn_layers=self.num_gnn_layers,
+                                           dropout=self.dropout)(key, noisy_coordinates)
+
+        # Interresidue Geometry Prediction
+        pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
+
+        # Backbone Solver
+        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
+        updated_transforms = BackboneSolver(
+            num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
+
+        # TransformsToStructure (going back to 3D coordinates)
+        denoised_coordinates = None
+        return denoised_coordinates
