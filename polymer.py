@@ -38,11 +38,11 @@ def diffuse(noise, coordinates, timestep, rg_confined=True, mode='pile-of-globs'
         # Scaling a and computing b
         a = 2.1939  # # 'segment length' = 3.8 Angstroms, which becomes scaled with sqrt(3)
         b = compute_b(N, B, a)  # N (res) and B (atoms per res) is input to compute_b function
-        rz = rg_confined_covariance(noise, n_atoms=x0.shape[0], a=a, b=b)
+        rz = rg_confined_covariance(noise, a=a, b=b)
     else:  # use ideal-chain diffusion
         radius_g = compute_radius_of_gyration(x0)
         gamma = math.sqrt((radius_g ** 2) * 2 / N)
-        rz = ideal_covariance(noise, n_atoms=x0, gamma=gamma, delta=0.0)  # parameters from config file
+        rz = ideal_covariance(noise, gamma=gamma, delta=0.0)  # parameters from config file
 
     # Diffusion Step
     x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(1 - alpha_t) * rz  # * scale
@@ -56,7 +56,11 @@ def diffuse(noise, coordinates, timestep, rg_confined=True, mode='pile-of-globs'
     return noised_coordinates
 
 
-def ideal_covariance(z, n_atoms, gamma, delta):
+# The flow here:
+# I just need a pure function that returns a covariance matrix given n_atoms, a and b
+
+
+def ideal_covariance(z, gamma, delta):
     """This method computes the matmul(R, z) for the ideal chain covariance model. For the formula, see section C.2
     'Covariance model #1: Ideal Chain' in Chroma Paper.
     Args:
@@ -65,24 +69,24 @@ def ideal_covariance(z, n_atoms, gamma, delta):
         gamma: length scale of the chain
         delta: amount of allowed translational noise about the origin
     (unit-tested)"""
+    n_atoms = z.shape[0]
     cu_z = gamma * jnp.cumsum(z, axis=0)  # cumulative z
     constant_terms = delta * cu_z[0] - (1 / n_atoms) * (jnp.sum(cu_z))
     return cu_z + constant_terms
 
 
-def rg_confined_covariance(z, n_atoms, a, b):
+def rg_confined_covariance(z, a, b):
     """This method computes the matmul(R, z) for the Rg-confined, linear-time Polymer MVNs. For the construction of
     the R matrix, see section C.3 'Covariance model #2: Rg-confined, linear-time Polymer MVNs' in the Chroma Paper.
     Args:
         z: noise samples from z ~ N(0, I) of shape x0.shape
-        n_atoms: number of atoms
         a: a global scale parameter setting the 'segment length' of polymer
         b: a 'decay' parameter which sets the memory of the chain to fluctuations
     Returns:
-
     (unit-tested)"""
     # Construct Rg confined covariance matrix
-    b_vec = b ** (jnp.arange(n_atoms))
+    n_atoms = z.shape[0]
+    b_vec = b ** (jnp.arange(n_atoms))  # [N_at,]
 
     rows = []
     v = 1 / (jnp.sqrt(1 - b ** 2))
@@ -93,7 +97,22 @@ def rg_confined_covariance(z, n_atoms, a, b):
         rows.append(padded_row)
     rows.reverse()
     R_matrix = a * jnp.stack(rows, axis=0)
-    return jnp.matmul(R_matrix, z)
+    rz = jnp.matmul(R_matrix, z)
+
+    # Construct the inverse matrix
+    # First and last element are edge cases, the rest is simpler
+    y = jnp.array([-b, (1 + b**2), -b])
+    first_row = jnp.pad(jnp.array([1, -b]), (0, n_atoms-2))
+    rows = [first_row]
+    for i in range(1, n_atoms-1):  # except first and last rows
+        row = jnp.pad(y, (i, n_atoms-3-i))
+        rows.append(row)
+    last_row = jnp.flip(first_row)
+    rows.append(last_row)
+    inverse_covariance_matrix = jnp.stack(rows, axis=0)
+    # Compute square root
+
+    return rz, inverse_covariance_matrix
 
 
 def log_snr_schedule(timestep):
@@ -133,7 +152,7 @@ def compute_b(N, B, a):
 
 
 def deflate_mean(x, xi):
-    """This method implements the mean-deflation operation that retunes the translational variance of each chain.
+    """This method implements the mean-deflation operation that re-tunes the translational variance of each chain.
     Args: x: the atom coordinates (N, 3) xi: set based on pile-of-globs or glob-of-globs covariance modes.
     Pile-of-globs: set xi so that the translational variance of each chain is unity. This will cause chains to have a
     realistic radius of gyration but pile up at the origin. Glob-of-globs covariance: set xi per chain by solving for
