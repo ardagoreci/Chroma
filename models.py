@@ -84,6 +84,25 @@ def compute_distances(a, b) -> jnp.array:
     return dists
 
 
+def timestep_embedding(timesteps, dim, max_period=10000):
+    """
+    Create sinusoidal timestep embeddings.
+    Args:
+        timesteps: a 1-D Tensor of B indices, one per batch element.
+        dim: the dimension of the output
+        max_period: controls the minimum frequency of the embeddings.
+    Returns:
+        a Tensor of shape (B, dim) of positional embeddings
+    """
+    half = dim // 2
+    freqs = jnp.exp(-jnp.log(max_period) * jnp.arange(0, half, dtype=jnp.float32) / half)
+    args = timesteps[:, None] * freqs[None]
+    embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
+    if dim % 2:
+        embedding = jnp.concatenate([embedding, jnp.zeros_like(embedding[:, :1])], axis=-1)
+    return embedding
+
+
 class PositionalEncodings(nn.Module):
     """A module that implements relative positional encodings as edge features. Given an edge between two residues i
     and j, the relative positional encoding encodes the distance between i and j in the primary amino acid sequence.
@@ -310,12 +329,13 @@ class BackboneGNN(nn.Module):
     dropout: float = 0.1  # dropout rate
 
     @nn.compact
-    def __call__(self, key, noisy_coordinates):
+    def __call__(self, key, noisy_coordinates, timesteps):
         """
         h_V.shape == (B, N, node_embedding_dim) and h_E.shape == (B, N, K, edge_embedding_dim)
         Args:
             key: random PRNGKey
             noisy_coordinates: noisy coordinates of shape (B, N, 4, 3)
+            timesteps: timesteps of shape [B,]
         Returns:
         """
         B, N, _, _ = noisy_coordinates.shape
@@ -327,6 +347,9 @@ class BackboneGNN(nn.Module):
         # Graph featurization
         h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
                                    node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
+        # Add timestep embedding to node embeddings
+        timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
+        h_V = h_V + jnp.broadcast_to(jnp.expand_dims(timestep_embeddings, axis=1), shape=h_V.shape)  # broadcast and add
 
         # MPNN layers
         for _ in range(self.num_gnn_layers):
@@ -551,14 +574,22 @@ class Chroma(nn.Module):
     backbone_solver_iterations: int = 1  # this is not implemented for more than 1 yet.
 
     @nn.compact
-    def __call__(self, key, noisy_coordinates):
+    def __call__(self, key, noisy_coordinates, timesteps):
+        """
+        Args:
+            key: random PRNGKey
+            noisy_coordinates: noisy coordinates of shape [B, N, 4, 3]
+            timesteps: timesteps of shape [B,]
+        Returns:
+            denoised coordinates
+        """
         # BackboneGNN
         h_V, h_E, topologies = BackboneGNN(node_embedding_dim=self.node_embedding_dim,
                                            edge_embedding_dim=self.edge_embedding_dim,
                                            node_mlp_hidden_dim=self.node_mlp_hidden_dim,
                                            edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                            num_gnn_layers=self.num_gnn_layers,
-                                           dropout=self.dropout)(key, noisy_coordinates)
+                                           dropout=self.dropout)(key, noisy_coordinates, timesteps)
 
         # Interresidue Geometry Prediction
         pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
