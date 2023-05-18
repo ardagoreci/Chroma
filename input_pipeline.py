@@ -51,9 +51,7 @@ def remove_enumeration(index, element):
 
 
 def create_protein_dataset(crop_size: int,
-                           batch_size: int = 128,
-                           shuffle: bool = False,
-                           dtype: str = 'float32') -> tf.data.Dataset:
+                           batch_size: int = 128) -> tf.data.Dataset:
     """Given a crop size and a batch size"""
     # Load the dataset from GCS
     gcs_path = "gs://chroma-af/thermo-ds"  # TODO: load this from configs file
