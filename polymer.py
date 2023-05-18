@@ -11,53 +11,28 @@ import jax
 import jax.numpy as jnp
 
 
-@jax.jit
-def diffuse(noise, coordinates, timestep, rg_confined=True, mode='pile-of-globs'):
+def diffuse(noise, R, x0, timestep, mode='pile-of-globs'):
     """This method diffuses the coordinates of the polymer up to the given time. The diffusion
     is integrated forward in time according to the following formula:
     x_t = sqrt(alpha_t)*x0 + sqrt(1-alpha_t)*matmul(R,z) where z follows multivariate normal.
     Args:
         noise: noise (z) that follows z ~ N(0, I) of shape [N_atoms, 3]
-        coordinates: a matrix of size [N, B ,3] where N is the number of residues, B is the number of backbone atoms
+        R: square root of the covariance matrix
+        x0: a matrix of size [N_at ,3] where N_at is the number of atoms
         timestep: the timestep between [0, 1] where 0 is the data and 1 is noise.
-        rg_confined: whether to use to Radius of Gyration confined (Covariance model #2) in Chroma paper, default True
         mode: the rg_confined mode has a 'pile-of-globs' and 'glob-of-globs' mode
     Returns:
-        noised coordinates of shape [N, B, 3]
-    TODO: get the rg_confined and mode parameters from the config file
+        noised coordinates of shape [N_at, 3]
     TODO: implement mean deflation
     (unit-tested)"""
-    # Reshape to (N_atoms, 3)
-    N, B, _ = coordinates.shape
-    x0 = coordinates.reshape((N * B, 3))
 
     # Get alpha_t from diffusion schedule
-    alpha_t = log_snr_schedule(timestep)
-
-    if rg_confined:
-        # Scaling a and computing b
-        a = 2.1939  # # 'segment length' = 3.8 Angstroms, which becomes scaled with sqrt(3)
-        b = compute_b(N, B, a)  # N (res) and B (atoms per res) is input to compute_b function
-        rz = rg_confined_covariance(noise, a=a, b=b)
-    else:  # use ideal-chain diffusion
-        radius_g = compute_radius_of_gyration(x0)
-        gamma = math.sqrt((radius_g ** 2) * 2 / N)
-        rz = ideal_covariance(noise, gamma=gamma, delta=0.0)  # parameters from config file
+    alpha_t = get_alpha_t(timestep)
+    rz = jnp.matmul(R, noise)  # Compute prior rz
 
     # Diffusion Step
     x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(1 - alpha_t) * rz  # * scale
-
-    # Mean deflation operation TODO: implement this
-    if rg_confined:
-        # deflate_mean()
-        pass
-    # Reshape to [N, B, 3]
-    noised_coordinates = x_t.reshape((N, B, 3))
-    return noised_coordinates
-
-
-# The flow here:
-# I just need a pure function that returns a covariance matrix given n_atoms, a and b
+    return x_t
 
 
 def ideal_covariance(z, gamma, delta):
@@ -72,20 +47,20 @@ def ideal_covariance(z, gamma, delta):
     n_atoms = z.shape[0]
     cu_z = gamma * jnp.cumsum(z, axis=0)  # cumulative z
     constant_terms = delta * cu_z[0] - (1 / n_atoms) * (jnp.sum(cu_z))
-    return cu_z + constant_terms
+    rz = cu_z + constant_terms
+    return rz
 
 
-def rg_confined_covariance(z, a, b):
+def rg_confined_covariance(n_atoms, a, b):
     """This method computes the matmul(R, z) for the Rg-confined, linear-time Polymer MVNs. For the construction of
     the R matrix, see section C.3 'Covariance model #2: Rg-confined, linear-time Polymer MVNs' in the Chroma Paper.
     Args:
-        z: noise samples from z ~ N(0, I) of shape x0.shape
+        n_atoms: number of atoms in protein
         a: a global scale parameter setting the 'segment length' of polymer
         b: a 'decay' parameter which sets the memory of the chain to fluctuations
     Returns:
     (unit-tested)"""
     # Construct Rg confined covariance matrix
-    n_atoms = z.shape[0]
     b_vec = b ** (jnp.arange(n_atoms))  # [N_at,]
 
     rows = []
@@ -96,35 +71,23 @@ def rg_confined_covariance(z, a, b):
         padded_row = jnp.pad(row, (0, i))
         rows.append(padded_row)
     rows.reverse()
-    R_matrix = a * jnp.stack(rows, axis=0)
-    rz = jnp.matmul(R_matrix, z)
-
-    # Construct the inverse matrix
-    # First and last element are edge cases, the rest is simpler
-    y = jnp.array([-b, (1 + b**2), -b])
-    first_row = jnp.pad(jnp.array([1, -b]), (0, n_atoms-2))
-    rows = [first_row]
-    for i in range(1, n_atoms-1):  # except first and last rows
-        row = jnp.pad(y, (i, n_atoms-3-i))
-        rows.append(row)
-    last_row = jnp.flip(first_row)
-    rows.append(last_row)
-    inverse_covariance_matrix = jnp.stack(rows, axis=0)
-    # Compute square root
-
-    return rz, inverse_covariance_matrix
+    R = a * jnp.stack(rows, axis=0)
+    R_inverse = jnp.linalg.inv(R)
+    return R, R_inverse
 
 
-def log_snr_schedule(timestep):
-    """
-    This method implements a test schedule that gives a monotonically decreasing alpha_t value given a timestep. See
-    Kingma et al. 2021 Args: timestep: a timestep between [0, 1]
-    TODO: make sure this is the actual diffusion schedule used by Kingma et al. 2021.
-     I know this is their continuous implementation of the Ho et al. 2020
-     schedule, not sure if it refers to the log SNR schedule mentioned in Chroma Paper.
-    """
-    # jax.nn.sigmoid((timestep-0.5)*5)
-    return jnp.exp(-jnp.e ** (-4) - 10 * (timestep ** 2))
+def get_alpha_t(t):
+    """Computes alpha_t given a timestep according to the log-linear SNR schedule
+    described in Kingma et al. 2021. The log(SNR_max) = 13.5 and log(SNR_min) = -7.0.
+    The diffusion loss is invariant to the schedule as long as the SNR_max and SNR_min
+    are kept the same."""
+    return jax.nn.sigmoid(13.5 - 20.5*t)
+
+
+def SNR(t):
+    """Computes signal-to-noise ratio given a timestep."""
+    y = (13.5 - 20.5*t)
+    return jnp.exp(y)
 
 
 def compute_b(N, B, a):
