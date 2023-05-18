@@ -1,7 +1,6 @@
 """"""
 
 import flax
-
 import jax
 import ml_collections
 import optax
@@ -13,18 +12,29 @@ from flax.training import common_utils
 from absl import logging
 from clu import metric_writers, periodic_actions
 import input_pipeline
+from models import Chroma
 
 
 def create_model(config):
-    """Creates and initializes the UNet model."""
-    return None
+    """Creates the Chroma model."""
+    model = Chroma(node_embedding_dim=config.node_embedding_dim,
+                   edge_embedding_dim=config.edge_embedding_dim,
+                   node_mlp_hidden_dim=config.node_mlp_hidden_dim,
+                   edge_mlp_hidden_dim=config.edge_mlp_hidden_dim,
+                   num_gnn_layers=config.num_gnn_layers,
+                   dropout=config.dropout)
+    return model
 
 
-def initialize(key, image_size, model, local_batch_size):
+def initialize(key, model, config, local_batch_size):
     """Utility function to initialize the model."""
-    dummy_x = jnp.zeros((local_batch_size, image_size, image_size, model.in_channels))
+    key = jax.random.PRNGKey(12)
+    key1, key2 = jax.random.split(key, num=2)
+    B, N = local_batch_size, config.crop_size
+    dummy_coordinates = jnp.ones((B, N, 4, 3))
     dummy_timesteps = jnp.zeros((local_batch_size,))
-    params = model.init(key, dummy_x, dummy_timesteps)
+    # TODO: add timesteps
+    params = model.init(rngs={'params': key1, 'dropout': key2}, key=key, noisy_coordinates=dummy_coordinates)
     return params
 
 
