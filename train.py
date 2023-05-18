@@ -28,14 +28,26 @@ def create_model(config):
 
 def initialize(key, model, config, local_batch_size):
     """Utility function to initialize the model."""
-    key = jax.random.PRNGKey(12)
     key1, key2 = jax.random.split(key, num=2)
     B, N = local_batch_size, config.crop_size
     dummy_coordinates = jnp.ones((B, N, 4, 3))
     dummy_timesteps = jnp.zeros((local_batch_size,))
-    # TODO: add timesteps
-    params = model.init(rngs={'params': key1, 'dropout': key2}, key=key, noisy_coordinates=dummy_coordinates)
+    params = model.init(rngs={'params': key1, 'dropout': key2},
+                        key=key,
+                        noisy_coordinates=dummy_coordinates,
+                        timesteps=dummy_timesteps)
     return params
+
+
+def mean_squared_error(x, y):
+    """Computes the element-wise mean squared error between x and y."""
+    return jnp.mean(jnp.square(x - y))
+
+
+def compute_metrics(x_pred, x0):
+    """Returns a dictionary of metrics for the given logits and labels."""
+    mse = mean_squared_error(x_pred, x0)
+    return {'loss': mse}
 
 
 def create_learning_rate_fn(config: ml_collections.ConfigDict):
@@ -52,7 +64,6 @@ def prepare_tf_data(xs):
     def _prepare(x):
         # Use _numpy() for zero-copy conversion between TF and NumPy.
         x = x._numpy()  # pylint: disable=protected-access
-
         # reshape (host_batch_size, height, width, 3) to
         # (local_devices, device_batch_size, height, width, 3)
         return x.reshape((local_device_count, -1) + x.shape[1:])
@@ -60,15 +71,28 @@ def prepare_tf_data(xs):
     return jax.tree_util.tree_map(_prepare, xs)
 
 
-def diffusion_train_step(key: jax.random.PRNGKey,
-                         state: TrainState,
-                         batch) -> TrainState:
+def create_input_iter(config):
+    """Creates an iterator for the given dataset and split.
+    Args:
+        config: the config dictionary
+    Returns:
+        an iterator of containing batched training examples
+    """
+    dataset = input_pipeline.create_protein_dataset(config.crop_size,
+                                                    config.batch_size)
+    iterator = map(prepare_tf_data, dataset)
+    return iterator
+
+
+def train_step(key: jax.random.PRNGKey,
+               state: TrainState,
+               batch) -> TrainState:
     """
     Perform a single training step for diffusion.
     Args:
         key: random key for sampling timesteps
         state: train state
-        batch: batch of images containing images and epsilons
+        batch: batch of protein xyz coordinates of shape [B, N, 4, 3] cropped to size N
     1. Sample timesteps
     2. Get noised protein batch
     3. Apply model to noised protein batch
@@ -76,10 +100,9 @@ def diffusion_train_step(key: jax.random.PRNGKey,
     5. All-reduce gradients
     6. Update train state
     """
-    images = batch[0]  # xyz coordinates
     epsilons = jax.random.normal(key, shape=())  # epsilons drawn from normal distribution
-    batch_size, *_ = images.shape
-    timesteps = jax.random.randint(key, minval=1, maxval=1000, shape=(batch_size,))  # Diffusion for 1000 steps
+    batch_size, *_ = batch.shape
+    timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
     # Noise protein
 
     def loss_fn(params):
@@ -96,3 +119,11 @@ def diffusion_train_step(key: jax.random.PRNGKey,
     # Update train state
     new_state = state.apply_gradients(grads=grads)
     return new_state, metrics
+
+
+def diffusion_eval_step(key, state, batch):
+    """Perform a single evaluation step for diffusion."""
+    images = batch[0]
+    epsilons = batch[1]
+    batch_size, *_ = images.shape
+    return None  # compute_metrics(epsilon_theta, epsilons)
