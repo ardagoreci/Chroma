@@ -6,9 +6,9 @@ linear time. This module implements various functions for the polymer-structured
 compute key metrics such as radius of gyration."""
 
 # Dependencies
-import math
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def diffuse(noise, R, x0, timestep, mode='pile-of-globs'):
@@ -61,18 +61,18 @@ def rg_confined_covariance(n_atoms, a, b):
     Returns:
     (unit-tested)"""
     # Construct Rg confined covariance matrix
-    b_vec = b ** (jnp.arange(n_atoms))  # [N_at,]
+    b_vec = b ** (np.arange(n_atoms))  # [N_at,]
 
     rows = []
-    v = 1 / (jnp.sqrt(1 - b ** 2))
+    v = 1 / (np.sqrt(1 - b ** 2))
     for i in range(len(b_vec)):
-        row = jnp.flip(b_vec[:len(b_vec) - i])
-        row = row.at[0].set(row[0] * v)  # Multiplying v with the first element, jnp.at for updates
-        padded_row = jnp.pad(row, (0, i))
+        row = np.flip(b_vec[:len(b_vec) - i])
+        row[0] = row[0] * v  # Multiplying v with the first element, jnp.at for updates
+        padded_row = np.pad(row, (0, i))
         rows.append(padded_row)
     rows.reverse()
-    R = a * jnp.stack(rows, axis=0)
-    R_inverse = jnp.linalg.inv(R)
+    R = a * np.stack(rows, axis=0)
+    R_inverse = np.linalg.inv(R)
     return R, R_inverse
 
 
@@ -105,11 +105,11 @@ def compute_b(N, B, a):
     """
     # (See Tanner, 2016)
     n_atoms = N * B
-    r = (2.0 / jnp.sqrt(3)) / (B ** 0.4)  # r is an experimentally determined prefactor with value 2.0 Angstroms but is
+    r = (2.0 / np.sqrt(3)) / (B ** 0.4)  # r is an experimentally determined prefactor with value 2.0 Angstroms but is
     # scaled to this value when n_atoms are used. Also, the segment length 'a' of 3.8 Angstroms is scaled with
     # sqrt(3) so r has to be scaled with the same number to keep b invariant
     v = 0.4  # narrow range between 0.38-0.40, taken to be 0.40 (See Tanner, 2016)
-    b_effective = 3 / n_atoms + (n_atoms ** (-v)) * jnp.sqrt(
+    b_effective = 3 / n_atoms + (n_atoms ** (-v)) * np.sqrt(
         n_atoms ** (2 * v - 2) * (n_atoms ** 2 + 9) - ((a ** 2) / (r ** 2)))
     return b_effective
 
