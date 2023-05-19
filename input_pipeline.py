@@ -6,6 +6,7 @@ is variable (quite difficult to make that work in JAX, so I might switch to PyTo
 """
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from polymer import rg_confined_covariance, compute_b
 
 
 def crop_proteins(ds, crop_size):
@@ -52,7 +53,8 @@ def remove_enumeration(index, element):
 
 def create_protein_dataset(crop_size: int,
                            batch_size: int = 128) -> tf.data.Dataset:
-    """Given a crop size and a batch size"""
+    """Given a crop size and a batch size, constructs a high-throughput data pipeline
+    for TPU training. (unit-tested)"""
     # Load the dataset from GCS
     gcs_path = "gs://chroma-af/thermo-ds"  # TODO: load this from configs file
     ds = tf.data.Dataset.load(gcs_path)
@@ -68,6 +70,13 @@ def create_protein_dataset(crop_size: int,
 
     # Crop proteins
     ds = crop_proteins(ds, crop_size)
+
+    # Add R and R^-1 to training data
+    a = 2.1939
+    R, R_inverse = rg_confined_covariance(n_atoms=crop_size * 4,
+                                          a=a,
+                                          b=compute_b(crop_size, 4, a))
+    ds = ds.map(lambda xyz: (xyz, R, R_inverse))
 
     # Batch and prefetch
     ds = ds.batch(batch_size, drop_remainder=True)  # drop_remainder for TPU training
