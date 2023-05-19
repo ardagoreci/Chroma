@@ -13,6 +13,7 @@ from absl import logging
 from clu import metric_writers, periodic_actions
 import input_pipeline
 from models import Chroma
+import polymer
 
 
 def create_model(config):
@@ -100,13 +101,30 @@ def train_step(key: jax.random.PRNGKey,
     5. All-reduce gradients
     6. Update train state
     """
-    epsilons = jax.random.normal(key, shape=())  # epsilons drawn from normal distribution
-    batch_size, *_ = batch.shape
+    xyz = batch[0]  # TODO: named accession instead of index
+    R = batch[1]
+    R_inverse = batch[2]
+    batch_size, N_res, B, _ = xyz.shape[0]
+    n_atoms = N_res * B
     timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
+    x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     # Noise protein
+    epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
+    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps)
+    key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
 
     def loss_fn(params):
-        loss = 0  # (timestep scaling) * (R^-1 + omega*I)(x_theta(x_t, t) - x)
+        """Computes the diffusion loss given the parameters of the network.
+        The loss is computed according to the formula in section A.2 of Chroma Paper.
+        This loss is highly analogous to the diffusion loss used in Kingma et al. 2021."""
+        x_theta = state.apply_fn(params, key, x_t, timesteps, rngs={'dropout': dropout_key})
+        derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
+        tau_t = (-0.5) * derivative_snr  # used to scale the loss in a time-dependent manner
+        regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
+        # absolute errors in x space, expanded for broadcasting across batch dimension
+        offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
+        reconstruction_error = mean_squared_error(offset, jnp.zeros_like(offset))
+        loss = tau_t * reconstruction_error
         return loss
 
     # Compute gradient
