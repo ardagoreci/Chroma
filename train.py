@@ -4,6 +4,7 @@ import flax
 import jax
 import ml_collections
 import optax
+import time
 from jax import lax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
@@ -48,13 +49,14 @@ def mean_squared_error(x, y):
 def compute_metrics(x_pred, x0):
     """Returns a dictionary of metrics for the given logits and labels."""
     mse = mean_squared_error(x_pred, x0)
-    return {'loss': mse}
+    return {'error': mse}
 
 
 def create_learning_rate_fn(config: ml_collections.ConfigDict):
     # TODO: implement the schedule that the authors have used.
     def _base_fn(step):
         return config.learning_rate
+
     return _base_fn
 
 
@@ -130,7 +132,7 @@ def train_step(key: jax.random.PRNGKey,
     # Compute gradient
     grad_fn = jax.value_and_grad(loss_fn)
     mse, grads = grad_fn(state.params)
-    # Update parameters (all-reduce gradients)
+    # All-reduce gradients across devices
     grads = jax.lax.pmean(grads, axis_name='batch')
     metrics = {'loss': mse}
 
@@ -139,9 +141,174 @@ def train_step(key: jax.random.PRNGKey,
     return new_state, metrics
 
 
-def diffusion_eval_step(key, state, batch):
+def eval_step(key, state, batch):
     """Perform a single evaluation step for diffusion."""
-    images = batch[0]
-    epsilons = batch[1]
-    batch_size, *_ = images.shape
-    return None  # compute_metrics(epsilon_theta, epsilons)
+    xyz = batch[0]  # TODO: named accession instead of index
+    R = batch[1]
+    R_inverse = batch[2]
+    batch_size, N_res, B, _ = xyz.shape[0]
+    n_atoms = N_res * B
+    timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
+    x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
+    # Noise protein
+    epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
+    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps)
+    key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
+    # Predict x0
+    x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key})
+    # Compute metrics as mean squared error
+    return compute_metrics(x_theta, x0)
+
+
+def save_checkpoint(workdir, state):
+    state = jax.device_get(state)
+    step = int(state.step)
+    checkpoints.save_checkpoint(workdir, target=state, step=step, keep=3)
+
+
+def create_train_state(rng,
+                       config: ml_collections.ConfigDict,
+                       model,
+                       learning_rate_fn):
+    """
+    Creates the initial train state object.
+    Args:
+        rng: random number generator
+        config: hyperparameter configuration
+        model: Flax model
+        image_size: integer specifying the height and width of input images
+        learning_rate_fn: function that returns the learning rate for a given step.
+    Returns:
+        the initial train state object.
+    """
+    params = initialize(rng, config.image_size, model,
+                        local_batch_size=config.batch_size // jax.device_count())
+    optimizer = optax.adam(learning_rate_fn)
+    opt_state = optimizer.init(params)
+    state = TrainState(apply_fn=model.apply,
+                       params=params,
+                       tx=optimizer,
+                       step=0,
+                       opt_state=opt_state)
+    return state
+
+
+def summarize_metrics(metrics):
+    """Summarizes the metrics."""
+    summary = {}
+    for metric in metrics:
+        for key, value in metric.items():
+            if summary.get(key) is None:
+                summary[key] = value
+            else:
+                summary[key] += value
+    # Average metrics
+    for key, value in summary.items():
+        summary[key] = value / len(metrics)
+    return summary
+
+
+def train_and_evaluate(config: ml_collections.ConfigDict,
+                       workdir: str):
+    """
+    Executes model training and evaluation loop.
+    Args:
+        config: Hyperparameter configuration for training and evaluation.
+        workdir: Directory where the Tensorboard summaries are written to.
+
+    Returns:
+        final train state.
+    """
+    # Initialize writer
+    writer = metric_writers.create_default_writer(logdir=workdir,
+                                                  just_logging=jax.process_index() != 0)
+    rng = jax.random.PRNGKey(config.seed)
+    # compute local_batch_size (with the appropriate divisibility assertion)
+    if config.batch_size % jax.device_count() > 0:
+        raise ValueError("Global batch size should be divisible by the number of devices.")
+    local_batch_size = config.batch_size // jax.device_count()
+    print(f"Local batch size: {local_batch_size}")
+    platform = jax.local_devices()[0].platform
+
+    # Create input iterator
+    train_iter = create_input_iter(config)
+    test_iter = create_input_iter(config)  # training dataset is used for testing for now
+    # Compute num_train_steps
+    steps_per_epoch = config.steps_per_epoch
+    if config.num_train_steps == -1:
+        num_steps = int(steps_per_epoch * config.num_epochs)
+    else:
+        num_steps = config.num_train_steps
+    steps_per_checkpoint = config.steps_per_checkpoint
+
+    if config.steps_per_eval == -1:
+        steps_per_eval = 300  # this is just a number, can be changed with config
+    else:
+        steps_per_eval = config.steps_per_eval
+
+    # Create model
+    model = create_model(config)
+    # Create learning rate function
+    learning_rate_fn = create_learning_rate_fn(config)
+    # Create train_state
+    state = create_train_state(rng, config, model, learning_rate_fn)
+    # restore checkpoint
+    state = checkpoints.restore_checkpoint(workdir, state)
+    # step_offset > 0 if we are resuming training
+    step_offset = int(state.step)  # 0 usually
+    state = flax.jax_utils.replicate(state)
+
+    # pmap transform train_step and eval_step
+    p_train_step = jax.pmap(train_step, axis_name='batch')
+    p_eval_step = jax.pmap(eval_step, axis_name='batch')  # , I don't have a test set for now
+
+    # Create train loop
+    train_metrics = []
+    hooks = []
+    if jax.process_index() == 0:
+        hooks += [periodic_actions.Profile(num_profile_steps=5, logdir=workdir)]
+    train_metrics_last_t = time.time()
+    logging.info("Initial compilation, this might take some minutes...")
+    for step, batch in zip(range(step_offset, num_steps), train_iter):
+        keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.device_count())
+        state, metrics = p_train_step(keys, state, batch)
+        if step == step_offset:
+            logging.info("Initial compilation done.")
+        if config.log_every_n_steps:
+            train_metrics.append(metrics)
+            if (step + 1) % config.log_every_n_steps == 0:
+                train_metrics = common_utils.get_metrics(train_metrics)
+                summary = {
+                    f'train_{k}': v
+                    for k, v in jax.tree_util.tree_map(lambda x: x.mean(), train_metrics).items()
+                }
+                summary['steps_per_second'] = config.log_every_n_steps / (
+                        time.time() - train_metrics_last_t)
+                # Write scalars to Tensorboard
+                writer.write_scalars(step + 1, summary)
+                train_metrics = []
+                train_metrics_last_t = time.time()
+
+            if (step + 1) % steps_per_epoch == 0:
+                epoch = step // steps_per_epoch
+                eval_metrics = []
+                for _ in range(steps_per_eval):
+                    eval_batch = next(test_iter)
+                    keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.device_count())
+                    metrics = p_eval_step(keys, state, eval_batch)
+                    eval_metrics.append(metrics)
+                eval_metrics = common_utils.get_metrics(eval_metrics)
+                summary = jax.tree_util.tree_map(lambda x: x.mean(), eval_metrics)
+                # summary = summarize_metrics(eval_metrics)
+                logging.info('eval epoch: %d, loss: %.4f',
+                             epoch, summary['loss'])
+                writer.write_scalars(
+                    step + 1, {f'eval_{key}': val for key, val in summary.items()})
+                # TODO: write sampled proteins to Tensorboard
+                writer.flush()
+                # if (step + 1) % steps_per_checkpoint == 0 or step + 1 == num_steps:
+                save_checkpoint(workdir, flax.jax_utils.unreplicate(state))  # TODO: save checkpoint with eval loss
+
+    # Wait until computations are done before exiting
+    jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+    return state
