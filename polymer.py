@@ -11,21 +11,19 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def diffuse(noise, R, x0, timestep, mode='pile-of-globs'):
+def diffuse(noise, R, x0, timestep):
     """This method diffuses the coordinates of the polymer up to the given time. The diffusion
     is integrated forward in time according to the following formula:
     x_t = sqrt(alpha_t)*x0 + sqrt(1-alpha_t)*matmul(R,z) where z follows multivariate normal.
     Args:
         noise: noise (z) that follows z ~ N(0, I) of shape [N_atoms, 3]
         R: square root of the covariance matrix
-        x0: a matrix of size [N_at ,3] where N_at is the number of atoms
+        x0: a matrix of size [N_atoms, 3]
         timestep: the timestep between [0, 1] where 0 is the data and 1 is noise.
-        mode: the rg_confined mode has a 'pile-of-globs' and 'glob-of-globs' mode
     Returns:
         noised coordinates of shape [N_at, 3]
     TODO: implement mean deflation
     (unit-tested)"""
-
     # Get alpha_t from diffusion schedule
     alpha_t = get_alpha_t(timestep)
     rz = jnp.matmul(R, noise)  # Compute prior rz
