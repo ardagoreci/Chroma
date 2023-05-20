@@ -25,7 +25,7 @@ def get_config() -> ml_collections.ConfigDict:
     config.warmup_epochs = 500
     config.momentum = 0.9
 
-    config.num_epochs = 100000000
+    config.num_epochs = 1000000
     config.log_every_n_steps = 100
     config.steps_per_epoch = 200
     config.steps_per_checkpoint = 2000  # save a checkpoint every 10 epochs
