@@ -46,6 +46,11 @@ def mean_squared_error(x, y):
     return jnp.mean(jnp.square(x - y))
 
 
+def squared_distance(x, y):
+    """Computes the squared distance between x and y."""
+    return jnp.sum(jnp.square(x-y))
+
+
 def compute_metrics(x_pred, x0):
     """Returns a dictionary of metrics for the given logits and labels."""
     mse = mean_squared_error(x_pred, x0)
@@ -106,13 +111,13 @@ def train_step(key: jax.random.PRNGKey,
     xyz = batch[0]  # TODO: named accession instead of index
     R = batch[1]
     R_inverse = batch[2]
-    batch_size, N_res, B, _ = xyz.shape[0]
+    batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
     timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps)
+    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
 
     def loss_fn(params):
@@ -120,13 +125,14 @@ def train_step(key: jax.random.PRNGKey,
         The loss is computed according to the formula in section A.2 of Chroma Paper.
         This loss is highly analogous to the diffusion loss used in Kingma et al. 2021."""
         x_theta = state.apply_fn(params, key, x_t, timesteps, rngs={'dropout': dropout_key})
-        derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
-        tau_t = (-0.5) * derivative_snr  # used to scale the loss in a time-dependent manner
+        x_theta = x_theta.reshape(x0.shape)
         regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
         # absolute errors in x space, expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-        reconstruction_error = mean_squared_error(offset, jnp.zeros_like(offset))
-        loss = tau_t * reconstruction_error
+        distances = jax.vmap(squared_distance)(offset, jnp.zeros_like(offset))  # [B,]
+        derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
+        tau_t = ((-0.5) * derivative_snr).reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
+        loss = jnp.sum(tau_t * distances)  # Sum over batch dim (would mean work better here?)
         return loss
 
     # Compute gradient
@@ -146,16 +152,16 @@ def eval_step(key, state, batch):
     xyz = batch[0]  # TODO: named accession instead of index
     R = batch[1]
     R_inverse = batch[2]
-    batch_size, N_res, B, _ = xyz.shape[0]
+    batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
     timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps)
+    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
     # Predict x0
-    x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key})
+    x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
     # Compute metrics as mean squared error
     return compute_metrics(x_theta, x0)
 
@@ -181,7 +187,7 @@ def create_train_state(rng,
     Returns:
         the initial train state object.
     """
-    params = initialize(rng, config.image_size, model,
+    params = initialize(rng, model, config,
                         local_batch_size=config.batch_size // jax.device_count())
     optimizer = optax.adam(learning_rate_fn)
     opt_state = optimizer.init(params)
@@ -300,8 +306,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
                 eval_metrics = common_utils.get_metrics(eval_metrics)
                 summary = jax.tree_util.tree_map(lambda x: x.mean(), eval_metrics)
                 # summary = summarize_metrics(eval_metrics)
-                logging.info('eval epoch: %d, loss: %.4f',
-                             epoch, summary['loss'])
+                logging.info('eval epoch: %d, error: %.4f',
+                             epoch, summary['error'])
                 writer.write_scalars(
                     step + 1, {f'eval_{key}': val for key, val in summary.items()})
                 # TODO: write sampled proteins to Tensorboard

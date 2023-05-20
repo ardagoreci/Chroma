@@ -531,7 +531,7 @@ class BackboneSolver(nn.Module):
             matrix: a matrix of size [3, 3]
         Returns: a rotation matrix of shape [3, 3] derived from 'matrix' via SVD
         (unit-tested)"""
-        u, s, vh = jnp.linalg.svd(matrix)
+        u, s, vh = jnp.linalg.svd(matrix, full_matrices=False)  # JAX grad creates problems if full_matrices = True
         V = vh.T
         # Decide whether we need to correct our rotation matrix to ensure a right-handed coordinate system
         d = jnp.sign(jnp.linalg.det(jnp.matmul(V, u.T)))
