@@ -21,14 +21,14 @@ def get_config() -> ml_collections.ConfigDict:
     config.backbone_solver_iterations = 1  # this is not implemented for more than 1 yet.
 
     # Optimization parameters
-    config.learning_rate = 0.01  # this will need to be tuned
-    config.warmup_epochs = 5.0
+    config.base_learning_rate = 0.001  # this will need to be tuned
+    config.warmup_epochs = 500
     config.momentum = 0.9
 
     config.num_epochs = 100000000
     config.log_every_n_steps = 100
     config.steps_per_epoch = 200
-    config.steps_per_checkpoint = 400  # save a checkpoint every two epochs
+    config.steps_per_checkpoint = 2000  # save a checkpoint every 10 epochs
     config.num_train_steps = 1000_000  # arbitrary
 
     config.num_train_steps = -1

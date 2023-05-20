@@ -48,7 +48,7 @@ def mean_squared_error(x, y):
 
 def squared_distance(x, y):
     """Computes the squared distance between x and y."""
-    return jnp.sum(jnp.square(x-y))
+    return jnp.sum(jnp.square(x - y))
 
 
 def compute_metrics(x_pred, x0):
@@ -57,12 +57,19 @@ def compute_metrics(x_pred, x0):
     return {'error': mse}
 
 
-def create_learning_rate_fn(config: ml_collections.ConfigDict):
-    # TODO: implement the schedule that the authors have used.
-    def _base_fn(step):
-        return config.learning_rate
-
-    return _base_fn
+def create_learning_rate_fn(config):
+    """Creates learning rate schedule."""
+    warmup_fn = optax.linear_schedule(
+        init_value=0., end_value=config.base_learning_rate,
+        transition_steps=config.warmup_epochs * config.steps_per_epoch)
+    cosine_epochs = max(config.num_epochs - config.warmup_epochs, 1)
+    cosine_fn = optax.cosine_decay_schedule(
+        init_value=config.base_learning_rate,
+        decay_steps=cosine_epochs * config.steps_per_epoch)
+    schedule_fn = optax.join_schedules(
+        schedules=[warmup_fn, cosine_fn],
+        boundaries=[config.warmup_epochs * config.steps_per_epoch])
+    return schedule_fn
 
 
 def prepare_tf_data(xs):
@@ -132,7 +139,7 @@ def train_step(key: jax.random.PRNGKey,
         distances = jax.vmap(squared_distance)(offset, jnp.zeros_like(offset))  # [B,]
         derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
         tau_t = ((-0.5) * derivative_snr).reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
-        loss = jnp.sum(tau_t * distances)  # Sum over batch dim (would mean work better here?)
+        loss = jnp.mean(tau_t * distances)  # average over batch dim
         return loss
 
     # Compute gradient
