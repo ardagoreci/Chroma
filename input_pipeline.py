@@ -89,19 +89,16 @@ def convert2iterator(ds):
     return iter(tfds.as_numpy(ds))
 
 
-def create_denoising_datasets(crop_size: int, batch_size: int, timestep: float):
+def create_denoising_datasets(crop_size: int, batch_size: int, scale: float = 2.0):
     ds = create_protein_dataset(crop_size, batch_size)
     ds = ds.unbatch()  # unbatch
 
     # Noise protein
-    def make_denoising_example(example):
-        xyz = example[0]
-        R = example[1]
-        R_inverse = example[2]
-        N, B, _ = xyz.shape
-        x0 = xyz.reshape((N * B, 3))
-        noise = np.random.normal(size=x0.shape)
-        noised_xyz = diffuse(noise, R, x0, timestep)
+    def make_denoising_example(xyz, R, R_inverse):
+        N_at, *_ = R.shape
+        x0 = tf.reshape(xyz, (N_at, 3))
+        noise = tf.random.normal(shape=x0.shape)
+        noised_xyz = tf.reshape((x0 + noise * scale), shape=(N_at // 4, 4, 3))
         return noised_xyz, xyz
 
     ds = ds.map(make_denoising_example)

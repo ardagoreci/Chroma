@@ -2,7 +2,7 @@
 
 # Dependencies
 import jax
-from Bio.PDB import *
+from Bio.PDB import Model, Atom, Residue, Chain
 import numpy as np
 import jax.numpy as jnp
 import py3Dmol
@@ -165,3 +165,77 @@ def visualize_connections(pdb_path, residue_pairs, cylinder_color='red', sphere_
     # Render the viewer
     viewer.zoomTo()
     viewer.show()
+
+
+def model_from_coordinates(model_id, coordinates):
+    new_model = Model.Model(id=model_id)
+    chain = Chain.Chain(id='A')
+    for i in range(coordinates.shape[0]):
+        res_id = (' ', i + 1, ' ')
+        resname = 'GLY'
+        seg_id = '    '
+        res_obj = Residue.Residue(res_id, resname, seg_id)
+
+        if coordinates.shape[1] == 1:
+            # Only CA atoms
+            ca_coord = coordinates[i][0]
+            ca_atom = Atom.Atom(name="CA",
+                                coord=ca_coord,
+                                bfactor=0.0,
+                                occupancy=1.0,
+                                altloc=' ',
+                                fullname="CA",
+                                element="C",
+                                serial_number=2)
+            res_obj.add(ca_atom)
+            chain.add(res_obj)
+
+        elif coordinates.shape[1] == 4:
+            # Backbone atoms
+            # residue.shape == (B, 3)
+            n_coord = coordinates[i][0]
+            n_atom = Atom.Atom(name="N",
+                               coord=n_coord,
+                               bfactor=0.0,
+                               occupancy=1.0,
+                               altloc=' ',
+                               fullname="N",
+                               element="N",
+                               serial_number=1)
+            ca_coord = coordinates[i][1]
+            ca_atom = Atom.Atom(name="CA",
+                                coord=ca_coord,
+                                bfactor=0.0,
+                                occupancy=1.0,
+                                altloc=' ',
+                                fullname="CA",
+                                element="C",
+                                serial_number=2)
+            c_coord = coordinates[i][2]
+            c_atom = Atom.Atom(name="C",
+                               coord=c_coord,
+                               bfactor=0.0,
+                               occupancy=1.0,
+                               altloc=' ',
+                               fullname="C",
+                               element="C",
+                               serial_number=3)
+            o_coord = coordinates[i][3]
+            o_atom = Atom.Atom(name="O",
+                               coord=o_coord,
+                               bfactor=0.0,
+                               occupancy=1.0,
+                               altloc=' ',
+                               fullname="O",
+                               element="O",
+                               serial_number=4)
+            res_obj.add(n_atom)
+            res_obj.add(ca_atom)
+            res_obj.add(c_atom)
+            res_obj.add(o_atom)
+
+            chain.add(res_obj)
+        else:
+            print("Error!")
+    new_model.add(chain)
+    return new_model

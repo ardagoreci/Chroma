@@ -59,6 +59,9 @@ def compute_metrics(x_pred, x0):
 
 def create_learning_rate_fn(config):
     """Creates learning rate schedule."""
+    def _base_fn(step):
+        return config.base_learning_rate
+
     warmup_fn = optax.linear_schedule(
         init_value=0.0001, end_value=config.base_learning_rate,
         transition_steps=config.warmup_epochs * config.steps_per_epoch)
@@ -69,7 +72,11 @@ def create_learning_rate_fn(config):
     schedule_fn = optax.join_schedules(
         schedules=[warmup_fn, cosine_fn],
         boundaries=[config.warmup_epochs * config.steps_per_epoch])
-    return schedule_fn
+
+    if config.use_constant_lr:
+        return _base_fn
+    else:
+        return schedule_fn
 
 
 def prepare_tf_data(xs):
@@ -97,6 +104,14 @@ def create_input_iter(config):
                                                     config.batch_size)
     iterator = map(prepare_tf_data, dataset)
     return iterator
+
+
+def create_denoising_input_iters(config):
+    train_ds, test_ds = input_pipeline.create_denoising_datasets(config.crop_size,
+                                                                 config.batch_size)
+    train_iter = map(prepare_tf_data, train_ds)
+    test_iter = map(prepare_tf_data, test_ds)
+    return train_iter, test_iter
 
 
 def train_step(key: jax.random.PRNGKey,
@@ -173,6 +188,44 @@ def eval_step(key, state, batch):
     return compute_metrics(x_theta, x0)
 
 
+def denoising_train_step(key: jax.random.PRNGKey,
+                         state: TrainState,
+                         batch) -> TrainState:
+    noised_xyz = batch[0]
+    xyz = batch[1]
+    dummy_timesteps = jnp.zeros((xyz.shape[0],))
+    key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
+
+    def loss_fn(params):
+        x_theta = state.apply_fn(params, key, noised_xyz, dummy_timesteps, rngs={'dropout': dropout_key})
+        return mean_squared_error(xyz, x_theta)
+
+    # Compute gradient
+    grad_fn = jax.value_and_grad(loss_fn)
+    mse, grads = grad_fn(state.params)
+    # All-reduce gradients across devices
+    grads = jax.lax.pmean(grads, axis_name='batch')
+    metrics = {'loss': mse}
+
+    # Update train state
+    new_state = state.apply_gradients(grads=grads)
+    return new_state, metrics
+
+
+def denoising_eval_step(key, state, batch):
+    noised_xyz = batch[0]
+    xyz = batch[1]
+    dummy_timesteps = jnp.zeros((xyz.shape[0],))
+    key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
+
+    x_theta = state.apply_fn(state.params,
+                             key,
+                             noised_xyz,
+                             dummy_timesteps,
+                             rngs={'dropout': dropout_key})
+    return compute_metrics(x_theta, xyz)
+
+
 def save_checkpoint(workdir, state):
     state = jax.device_get(state)
     step = int(state.step)
@@ -244,8 +297,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     platform = jax.local_devices()[0].platform
 
     # Create input iterator
-    train_iter = create_input_iter(config)
-    test_iter = create_input_iter(config)  # training dataset is used for testing for now
+    # train_iter = create_input_iter(config)
+    # test_iter = create_input_iter(config)  # training dataset is used for testing for now
+    train_iter, test_iter = create_denoising_input_iters(config)
     # Compute num_train_steps
     steps_per_epoch = config.steps_per_epoch
     if config.num_train_steps == -1:
@@ -272,8 +326,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     state = flax.jax_utils.replicate(state)
 
     # pmap transform train_step and eval_step
-    p_train_step = jax.pmap(train_step, axis_name='batch')
-    p_eval_step = jax.pmap(eval_step, axis_name='batch')  # , I don't have a test set for now
+    p_train_step = jax.pmap(denoising_train_step, axis_name='batch')  # replace denoising_train_step with train_step
+    p_eval_step = jax.pmap(denoising_eval_step, axis_name='batch')  # replace denoising_eval_step with eval_step
 
     # Create train loop
     train_metrics = []
