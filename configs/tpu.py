@@ -34,7 +34,7 @@ def get_config() -> ml_collections.ConfigDict:
     config.num_train_steps = -1
     config.steps_per_eval = 20
 
-    config.batch_size = 128
+    config.batch_size = 64
     config.cache = True
     config.half_precision = True
 

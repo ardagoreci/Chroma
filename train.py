@@ -297,9 +297,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     platform = jax.local_devices()[0].platform
 
     # Create input iterator
-    # train_iter = create_input_iter(config)
-    # test_iter = create_input_iter(config)  # training dataset is used for testing for now
-    train_iter, test_iter = create_denoising_input_iters(config)
+    train_iter = create_input_iter(config)
+    test_iter = create_input_iter(config)  # training dataset is used for testing for now
+    # train_iter, test_iter = create_denoising_input_iters(config)
     # Compute num_train_steps
     steps_per_epoch = config.steps_per_epoch
     if config.num_train_steps == -1:
@@ -326,8 +326,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     state = flax.jax_utils.replicate(state)
 
     # pmap transform train_step and eval_step
-    p_train_step = jax.pmap(denoising_train_step, axis_name='batch')  # replace denoising_train_step with train_step
-    p_eval_step = jax.pmap(denoising_eval_step, axis_name='batch')  # replace denoising_eval_step with eval_step
+    p_train_step = jax.pmap(train_step, axis_name='batch')  # replace denoising_train_step with train_step
+    p_eval_step = jax.pmap(eval_step, axis_name='batch')  # replace denoising_eval_step with eval_step
 
     # Create train loop
     train_metrics = []
