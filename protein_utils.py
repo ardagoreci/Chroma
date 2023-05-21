@@ -45,8 +45,6 @@ def transforms_to_structure(transforms) -> jnp.array:
         Returns:
             a jnp.array of shape [4, 3] encoding the transformed coordinates of N, CA, C, O in that order.
         """
-        # Convert translation to Angstroms from nanometers
-        t = t * 10
         N_at = jnp.array([-0.572, 1.337, 0.000])
         Ca_at = jnp.array([0.000, 0.000, 0.000])
         C_at = jnp.array([1.517, -0.000, -0.000])
@@ -95,7 +93,7 @@ def structure_to_transforms(coordinates) -> Transforms:
         e2 = u2 / jnp.linalg.norm(u2)
         e3 = jnp.cross(e1, e2)
         R = jnp.stack([e1, e2, e3], axis=0)
-        t = x2  * 0.1  # translation atom assigned to center atom x2, convert to nanometers
+        t = x2  # translation atom assigned to center atom x2, convert to nanometers
         return Transforms(t, R)
 
     N = coordinates[:, 0, :]

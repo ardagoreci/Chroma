@@ -412,7 +412,8 @@ class PairwiseGeometryPrediction(nn.Module):
         """
         output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
         confidences = output[:, :, :self.num_confidence_values]
-        translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3]
+        translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10  # predict
+        # translations in nanometers, convert to Angstroms
         # Compute Rotations
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
         # K dimensions are batch dim to vectorize function with jax.vmap
