@@ -600,6 +600,6 @@ class Chroma(nn.Module):
             num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
 
         # TransformsToStructure (going back to 3D coordinates)
-        denoised_coordinates = transforms_to_structure(updated_transforms)
+        denoised_coordinates = jax.vmap(transforms_to_structure)(updated_transforms)
         # TODO: residual updates for all-atom prediction
         return denoised_coordinates
