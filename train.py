@@ -305,7 +305,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     if config.num_train_steps == -1:
         num_steps = int(steps_per_epoch * config.num_epochs)
     else:
-        num_steps = config.num_train_steps
+        num_steps = config.num_train_stepsc
     steps_per_checkpoint = config.steps_per_checkpoint
 
     if config.steps_per_eval == -1:

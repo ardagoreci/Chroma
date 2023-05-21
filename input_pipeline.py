@@ -104,8 +104,8 @@ def create_denoising_datasets(crop_size: int, batch_size: int, scale: float = 2.
     ds = ds.map(make_denoising_example)
 
     # Split to train and take
-    train_ds = ds.take(10_000)
-    test_ds = ds.skip(10_000).take(2_000)
+    train_ds = ds.take(10_000).repeat()
+    test_ds = ds.skip(10_000).take(2_000).repeat()
 
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     test_ds = test_ds.batch(batch_size, drop_remainder=True)
