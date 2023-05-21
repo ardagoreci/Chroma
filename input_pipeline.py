@@ -6,7 +6,8 @@ is variable (quite difficult to make that work in JAX, so I might switch to PyTo
 """
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from polymer import rg_confined_covariance, compute_b
+from polymer import rg_confined_covariance, compute_b, diffuse
+import numpy as np
 
 
 def crop_proteins(ds, crop_size):
@@ -86,3 +87,29 @@ def create_protein_dataset(crop_size: int,
 
 def convert2iterator(ds):
     return iter(tfds.as_numpy(ds))
+
+
+def create_denoising_datasets(crop_size: int, batch_size: int, timestep: float):
+    ds = create_protein_dataset(crop_size, batch_size)
+    ds = ds.unbatch()  # unbatch
+
+    # Noise protein
+    def make_denoising_example(example):
+        xyz = example[0]
+        R = example[1]
+        R_inverse = example[2]
+        N, B, _ = xyz.shape
+        x0 = xyz.reshape((N * B, 3))
+        noise = np.random.normal(size=x0.shape)
+        noised_xyz = diffuse(noise, R, x0, timestep)
+        return noised_xyz, xyz
+
+    ds = ds.map(make_denoising_example)
+
+    # Split to train and take
+    train_ds = ds.take(10_000)
+    test_ds = ds.skip(10_000).take(2_000)
+
+    train_ds = train_ds.batch(batch_size, drop_remainder=True)
+    test_ds = test_ds.batch(batch_size, drop_remainder=True)
+    return train_ds, test_ds

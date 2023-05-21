@@ -21,7 +21,7 @@ def get_config() -> ml_collections.ConfigDict:
     config.backbone_solver_iterations = 1  # this is not implemented for more than 1 yet.
 
     # Optimization parameters
-    config.base_learning_rate = 0.001  # this will need to be tuned
+    config.base_learning_rate = 0.0001  # this will need to be tuned
     config.warmup_epochs = 500
     config.momentum = 0.9
 

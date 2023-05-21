@@ -60,7 +60,7 @@ def compute_metrics(x_pred, x0):
 def create_learning_rate_fn(config):
     """Creates learning rate schedule."""
     warmup_fn = optax.linear_schedule(
-        init_value=0.001, end_value=config.base_learning_rate,
+        init_value=0.0001, end_value=config.base_learning_rate,
         transition_steps=config.warmup_epochs * config.steps_per_epoch)
     cosine_epochs = max(config.num_epochs - config.warmup_epochs, 1)
     cosine_fn = optax.cosine_decay_schedule(
