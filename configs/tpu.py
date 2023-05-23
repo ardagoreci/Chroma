@@ -22,8 +22,8 @@ def get_config() -> ml_collections.ConfigDict:
 
     # Optimization parameters
     config.base_learning_rate = 1e-3  # this will need to be tuned
-    config.use_constant_lr = True
-    config.warmup_epochs = 500
+    config.use_constant_lr = False
+    config.warmup_epochs = 50
     config.momentum = 0.9
 
     config.num_epochs = 1000000
