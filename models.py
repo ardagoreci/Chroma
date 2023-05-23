@@ -347,9 +347,10 @@ class BackboneGNN(nn.Module):
         # Graph featurization
         h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
                                    node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
-        # Add timestep embedding to node embeddings
-        timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
-        h_V = h_V + jnp.broadcast_to(jnp.expand_dims(timestep_embeddings, axis=1), shape=h_V.shape)  # broadcast and add
+        # Add timestep embedding to node embeddings, TODO: adding the timestep embedding may not have been a good idea
+        # timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
+        # h_V = h_V + jnp.broadcast_to(jnp.expand_dims(timestep_embeddings, axis=1), shape=h_V.shape)
+        # broadcast and add
 
         # MPNN layers
         for _ in range(self.num_gnn_layers):
