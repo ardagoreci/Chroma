@@ -146,7 +146,7 @@ class ProteinFeatures(nn.Module):
     node_features_dim: int
     num_positional_embeddings: int = 16
     num_rbf: int = 16
-    num_chain_embeddings: int = 16
+    num_chain_embeddings: int = 32
 
     def setup(self):
         self.pos_embeddings = PositionalEncodings(self.num_positional_embeddings)
@@ -170,7 +170,7 @@ class ProteinFeatures(nn.Module):
          away, this might not cut it. I might have to expand the range and add more radial basis functions - should be
          a simple ratio calculation given the desired range.
         """
-        D_min, D_max, D_count = 2., 22., self.num_rbf
+        D_min, D_max, D_count = 2., 42., self.num_rbf
         D_mu = jnp.linspace(D_min, D_max, D_count)
         D_mu = D_mu.reshape((1, 1, -1))  # (1, 1, 1, -1) for batched version of function
         D_sigma = (D_max - D_min) / D_count
@@ -327,6 +327,7 @@ class BackboneGNN(nn.Module):
     edge_mlp_hidden_dim: int = 128
     num_gnn_layers: int = 12
     dropout: float = 0.1  # dropout rate
+    use_timestep_embedding: bool = True
 
     @nn.compact
     def __call__(self, key, noisy_coordinates, timesteps):
@@ -347,10 +348,11 @@ class BackboneGNN(nn.Module):
         # Graph featurization
         h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
                                    node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
-        # Add timestep embedding to node embeddings, TODO: adding the timestep embedding may not have been a good idea
-        # timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
-        # h_V = h_V + jnp.broadcast_to(jnp.expand_dims(timestep_embeddings, axis=1), shape=h_V.shape)
-        # broadcast and add
+        # Add timestep embedding to node embeddings
+        if self.use_timestep_embedding:
+            timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
+            h_V = h_V + jnp.broadcast_to(jnp.expand_dims(timestep_embeddings, axis=1), shape=h_V.shape)
+            # broadcast and add
 
         # MPNN layers
         for _ in range(self.num_gnn_layers):
@@ -413,7 +415,7 @@ class PairwiseGeometryPrediction(nn.Module):
         """
         output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
         confidences = output[:, :, :self.num_confidence_values]
-        translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10  # predict
+        translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10.0  # predict
         # translations in nanometers, convert to Angstroms
         # Compute Rotations
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
@@ -574,6 +576,7 @@ class Chroma(nn.Module):
     num_gnn_layers: int = 12
     dropout: float = 0.1  # dropout rate
     backbone_solver_iterations: int = 1  # this is not implemented for more than 1 yet.
+    use_timestep_embedding: bool = True
 
     @nn.compact
     def __call__(self, key, noisy_coordinates, timesteps):
@@ -591,6 +594,7 @@ class Chroma(nn.Module):
                                            node_mlp_hidden_dim=self.node_mlp_hidden_dim,
                                            edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                            num_gnn_layers=self.num_gnn_layers,
+                                           use_timestep_embedding=self.use_timestep_embedding,
                                            dropout=self.dropout)(key, noisy_coordinates, timesteps)
 
         # Interresidue Geometry Prediction

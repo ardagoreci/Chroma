@@ -24,6 +24,7 @@ def create_model(config):
                    node_mlp_hidden_dim=config.node_mlp_hidden_dim,
                    edge_mlp_hidden_dim=config.edge_mlp_hidden_dim,
                    num_gnn_layers=config.num_gnn_layers,
+                   use_timestep_embedding=config.use_timestep_embedding,
                    dropout=config.dropout)
     return model
 
@@ -151,7 +152,7 @@ def train_step(key: jax.random.PRNGKey,
         regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
         # absolute errors in x space, expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-        distances = jax.vmap(squared_distance)(offset, jnp.zeros_like(offset))  # [B,]
+        distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
         derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
         tau_t = ((-0.5) * derivative_snr).reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
         loss = jnp.mean(tau_t * distances)  # average over batch dim

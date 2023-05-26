@@ -19,14 +19,15 @@ def get_config() -> ml_collections.ConfigDict:
     config.num_gnn_layers = 3
     config.dropout = 0.1  # dropout rate
     config.backbone_solver_iterations = 1  # this is not implemented for more than 1 yet.
+    config.use_timestep_embedding = True
 
     # Optimization parameters
-    config.base_learning_rate = 1e-3  # this will need to be tuned
-    config.use_constant_lr = False
+    config.base_learning_rate = 0.5 * 1e-3  # this will need to be tuned
+    config.use_constant_lr = True
     config.warmup_epochs = 50
     config.momentum = 0.9
 
-    config.num_epochs = 1000000
+    config.num_epochs = 10_000
     config.log_every_n_steps = 100
     config.steps_per_epoch = 200
     config.steps_per_checkpoint = 2000  # save a checkpoint every 10 epochs
