@@ -35,7 +35,9 @@ def transforms_to_structure(transforms) -> jnp.array:
         shape [N, 3, 3]
     Returns:
         an array of shape [N, 4, 3] encoding the coordinates
-    (unit-tested)"""
+    (unit-tested)
+    TODO: test if gradients are actually flowing through this method
+    """
 
     def _frame_to_coor(t, O) -> jnp.array:
         """

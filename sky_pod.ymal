@@ -1,7 +1,8 @@
 name: chroma-v3-32
-
+workdir: ./Chroma
 resources:
-   project: structural-biology-353017
+   cloud: gcp
+   # project: structural-biology-353017
    zone: europe-west4-a
    accelerators: tpu-v3-32
    accelerator_args:

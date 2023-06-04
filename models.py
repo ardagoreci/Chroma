@@ -94,6 +94,7 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     Returns:
         a Tensor of shape (B, dim) of positional embeddings
     """
+    timesteps = timesteps * 1000  # Convert [0,1] scale to [0,1000]
     half = dim // 2
     freqs = jnp.exp(-jnp.log(max_period) * jnp.arange(0, half, dtype=jnp.float32) / half)
     args = timesteps[:, None] * freqs[None]
@@ -253,6 +254,7 @@ class MPNNLayer(nn.Module):
     node_mlp_hidden_dim: int
     dropout: float = 0.1
     scale: int = 60
+    residual_scale: float = 0.7071  # scale skip connections with 1/sqrt(2)
 
     def setup(self):
         # node message MLP
@@ -300,11 +302,11 @@ class MPNNLayer(nn.Module):
         h_message = self.node_mlp(h_EV)
         # Sum to i
         dh = jnp.sum(h_message, axis=-2) / self.scale
-        h_V = self.norm1(h_V + self.dropout_layer(dh))
+        h_V = self.norm1(self.residual_scale * h_V + self.dropout_layer(dh))
 
         # Position-wise feedforward
         dh = self.dense(h_V)
-        h_V = self.norm2(h_V + self.dropout_layer(dh))
+        h_V = self.norm2(self.residual_scale * h_V + self.dropout_layer(dh))
 
         # Edge Updates
         h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
@@ -314,7 +316,7 @@ class MPNNLayer(nn.Module):
 
         # Compute edge update with MLP
         h_update = self.edge_mlp(h_EV)
-        h_E = self.norm3(h_E + self.dropout_layer(h_update))
+        h_E = self.norm3(self.residual_scale * h_E + self.dropout_layer(h_update))
         return h_V, h_E
 
 
@@ -328,6 +330,7 @@ class BackboneGNN(nn.Module):
     num_gnn_layers: int = 12
     dropout: float = 0.1  # dropout rate
     use_timestep_embedding: bool = True
+    residual_scale: float = 0.7071
 
     @nn.compact
     def __call__(self, key, noisy_coordinates, timesteps):
@@ -360,7 +363,8 @@ class BackboneGNN(nn.Module):
                                  edge_embedding_dim=self.edge_embedding_dim,
                                  edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                  node_mlp_hidden_dim=self.node_mlp_hidden_dim,
-                                 dropout=self.dropout)(h_V, h_E, topologies)
+                                 dropout=self.dropout,
+                                 residual_scale=self.residual_scale)(h_V, h_E, topologies)
 
         return h_V, h_E, topologies
 
@@ -394,16 +398,31 @@ class PairwiseGeometryPrediction(nn.Module):
 
     def setup(self):
         self.linear = nn.Dense(3 + 3 + self.num_confidence_values)
+        self.node_mlp = nn.Dense(4 * 3)  # 3 coordinates for each node
 
     def __call__(self, h_V, h_E):
         batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
-        return batch_pairwise_geometries
+        batch_node_updates = jax.vmap(self.node_coordinate_update)(h_V)
+        return batch_node_updates, batch_pairwise_geometries
+
+    def node_coordinate_update(self, node_embeddings):
+        """Given node embeddings, computes a residual update for all backbone atom coordinates.
+        This allows Chroma to predict all backbone atom coordinates simultaneously, and the denoising
+        objective acts as a version of Noisy Nodes (Godwin et al. 2022) that regularizes deep MPNNs.
+        Args:
+            node_embeddings: node embeddings of shape [N, C]
+        Returns:
+            an array of shape [N, 4, 3] that are residual updates to backbone atom coordinates
+        """
+        output = self.node_mlp(node_embeddings)
+        residual_updates = output.reshape((node_embeddings.shape[0], 4, 3))
+        return residual_updates
 
     def backbone_update_with_confidence(self, pair_embeddings) -> PairwiseGeometries:
         """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
-        embedding, a linear layer predicts a vector for the translation and three additional components that define the
-        Euler axis. See AlphaFold Supplementary information section 1.8.3, Algorithm 23 "Backbone update".
-        This function is written for a single example.
+        embedding, a linear layer predicts a vector for the translation, three additional components that define the
+        Euler axis, and a confidence value. See AlphaFold Supplementary information section 1.8.3, Algorithm 23
+        "Backbone update". This function is written for a single example.
         Args:
             pair_embeddings: [N, K, C]
         Returns:
@@ -577,6 +596,7 @@ class Chroma(nn.Module):
     dropout: float = 0.1  # dropout rate
     backbone_solver_iterations: int = 1  # this is not implemented for more than 1 yet.
     use_timestep_embedding: bool = True
+    residual_scale: float = 1.0
 
     @nn.compact
     def __call__(self, key, noisy_coordinates, timesteps):
@@ -595,10 +615,11 @@ class Chroma(nn.Module):
                                            edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                            num_gnn_layers=self.num_gnn_layers,
                                            use_timestep_embedding=self.use_timestep_embedding,
-                                           dropout=self.dropout)(key, noisy_coordinates, timesteps)
+                                           dropout=self.dropout,
+                                           residual_scale=self.residual_scale)(key, noisy_coordinates, timesteps)
 
         # Interresidue Geometry Prediction
-        pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
+        node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
 
         # Backbone Solver
         transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
@@ -607,5 +628,7 @@ class Chroma(nn.Module):
 
         # TransformsToStructure (going back to 3D coordinates)
         denoised_coordinates = jax.vmap(transforms_to_structure)(updated_transforms)
-        # TODO: residual updates for all-atom prediction
+
+        # Residual updates for all-atom prediction
+        denoised_coordinates = denoised_coordinates + node_updates
         return denoised_coordinates

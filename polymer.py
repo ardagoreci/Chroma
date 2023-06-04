@@ -26,10 +26,11 @@ def diffuse(noise, R, x0, timestep):
     (unit-tested)"""
     # Get alpha_t from diffusion schedule
     alpha_t = get_alpha_t(timestep)
+    one_m_alpha_t = get_stable_1malpha(timestep)  # numerically stable implementation of (1 - alpha_t)
     rz = jnp.matmul(R, noise)  # Compute prior rz
 
     # Diffusion Step
-    x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(1 - alpha_t) * rz  # * scale
+    x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(one_m_alpha_t) * rz
     return x_t
 
 
@@ -79,13 +80,25 @@ def get_alpha_t(t):
     described in Kingma et al. 2021. The log(SNR_max) = 13.5 and log(SNR_min) = -7.0.
     The diffusion loss is invariant to the schedule as long as the SNR_max and SNR_min
     are kept the same."""
-    return jax.nn.sigmoid(13.5 - 20.5*t)
+    return jax.nn.sigmoid(13.5 - 20.5 * t)
+
+
+def get_beta_t(t):
+    alpha_t = get_alpha_t(t)
+    beta_t = jax.grad(SNR)(t) * (1 / alpha_t) * ((1 - alpha_t) ** 2)
+    return beta_t
 
 
 def SNR(t):
     """Computes signal-to-noise ratio given a timestep."""
-    y = (13.5 - 20.5*t)
+    y = (13.5 - 20.5 * t)
     return jnp.exp(y)
+
+
+def get_stable_1malpha(t):
+    """Computes (1-alpha_t) with numerically stable computational primitives expm1 and softplus."""
+    gamma = 13.5 - 20.5 * t
+    return -jnp.expm1(-jax.nn.softplus(-gamma))
 
 
 def compute_b(N, B, a):
