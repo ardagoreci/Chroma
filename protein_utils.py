@@ -95,7 +95,7 @@ def structure_to_transforms(coordinates) -> Transforms:
         e2 = u2 / jnp.linalg.norm(u2)
         e3 = jnp.cross(e1, e2)
         R = jnp.stack([e1, e2, e3], axis=0)
-        t = x2  # translation atom assigned to center atom x2, convert to nanometers
+        t = x2  # translation atom assigned to center atom x2
         return Transforms(t, R)
 
     N = coordinates[:, 0, :]

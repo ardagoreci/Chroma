@@ -137,7 +137,7 @@ def train_step(key: jax.random.PRNGKey,
     R_inverse = batch[2]
     batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
-    timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
+    timesteps = jax.random.uniform(key, minval=1e-3, maxval=1.0, shape=(batch_size,))
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
@@ -153,12 +153,10 @@ def train_step(key: jax.random.PRNGKey,
         regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
         # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-        distances = jax.vmap(squared_distance)(offset, jnp.zeros_like(offset))  # [B,]
-        # Add FAPE loss as the next step (would provide source of chirality)
-        # distances = jax.vmap(mean_squared_error)(x_theta, x0)
-        # derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
-        # tau_t = ((-0.5) * derivative_snr).reshape(batch_size, 1, 1)  # used to scale the
-        # loss in a time-dependent manner
+        distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+        # Scale the derivative
+        # derivative_snr = jax.vmap(jax.grad(polymer.get_alpha_t))(timesteps)  # derivative of alpha_t used to scale
+        # tau_t = -derivative_snr.reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
         loss = jnp.mean(distances)  # average over batch dim
         return loss
 

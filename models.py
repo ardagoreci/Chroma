@@ -152,7 +152,7 @@ class ProteinFeatures(nn.Module):
     def setup(self):
         self.pos_embeddings = PositionalEncodings(self.num_positional_embeddings)
         self.edge_embeddings = nn.Dense(self.edge_features_dim)
-        self.layer_norm = nn.LayerNorm()
+        self.norm_edges = nn.LayerNorm()
 
     def __call__(self, coordinates, topologies):  # X, mask, residue_idx, chain_labels
         return jax.vmap(self.single_example_forward)(coordinates, topologies)
@@ -228,6 +228,7 @@ class ProteinFeatures(nn.Module):
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
         E = jnp.concatenate([positional_embedding, RBF_all], axis=-1)  # concatenate along last axis
         E = self.edge_embeddings(E)  # embed with linear layer
+        E = self.norm_edges(E)  # normalize edges
         node_zeros = jnp.zeros((coordinates.shape[0], self.node_features_dim))  # zeros as node features
         return node_zeros, E
 

@@ -1,3 +1,7 @@
+"""This module implements the low temperature sampling that is used in Chroma. The paper introduces a
+new low temperature diffusion sampling procedure that increase sampling of high-likelihood states at the
+expense of reduced sample diversity."""
+
 import jax
 from polymer import get_stable_1malpha, SNR
 
