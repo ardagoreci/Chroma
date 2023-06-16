@@ -279,8 +279,10 @@ class MPNNLayer(nn.Module):
         self.norm2 = nn.LayerNorm()
         self.norm3 = nn.LayerNorm()
 
-        # Dropout
-        self.dropout_layer = nn.Dropout(rate=self.dropout, deterministic=False)
+        # Dropout layers
+        self.dropout1 = nn.Dropout(rate=self.dropout, deterministic=False)
+        self.dropout2 = nn.Dropout(rate=self.dropout, deterministic=False)
+        self.dropout3 = nn.Dropout(rate=self.dropout, deterministic=False)
 
         # Position-wise feedforward (acts as node update MLP)
         self.dense = PositionWiseFeedForward(num_hidden=self.node_embedding_dim,
@@ -303,11 +305,11 @@ class MPNNLayer(nn.Module):
         h_message = self.node_mlp(h_EV)
         # Sum to i
         dh = jnp.sum(h_message, axis=-2) / self.scale
-        h_V = self.norm1(self.residual_scale * h_V + self.dropout_layer(dh))
+        h_V = self.norm1(self.residual_scale * h_V + self.dropout1(dh))
 
         # Position-wise feedforward
         dh = self.dense(h_V)
-        h_V = self.norm2(self.residual_scale * h_V + self.dropout_layer(dh))
+        h_V = self.norm2(self.residual_scale * h_V + self.dropout2(dh))
 
         # Edge Updates
         h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
@@ -317,7 +319,7 @@ class MPNNLayer(nn.Module):
 
         # Compute edge update with MLP
         h_update = self.edge_mlp(h_EV)
-        h_E = self.norm3(self.residual_scale * h_E + self.dropout_layer(h_update))
+        h_E = self.norm3(self.residual_scale * h_E + self.dropout3(h_update))
         return h_V, h_E
 
 
@@ -399,7 +401,7 @@ class PairwiseGeometryPrediction(nn.Module):
 
     def setup(self):
         self.linear = nn.Dense(3 + 3 + self.num_confidence_values)
-        self.node_mlp = nn.Dense(4 * 3)  # 3 coordinates for each node
+        self.node_mlp = nn.Dense(4 * 3)  # 4 atom coordinates for each node
 
     def __call__(self, h_V, h_E):
         batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
