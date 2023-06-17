@@ -144,7 +144,7 @@ def compute_pairwise_geometries(transforms, topology):
     """Given current transforms of a protein, computes inter-residue transforms.
     Args:
         transforms: [N, ...]
-        topology: graph topology of shape [N,]
+        topology: graph topology of shape [N, K]
     """
     t_i = transforms.translations  # [N, 3]
     O_i = transforms.orientations  # [N, 3, 3]

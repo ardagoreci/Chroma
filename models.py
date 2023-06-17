@@ -161,10 +161,11 @@ class ProteinFeatures(nn.Module):
         RBF_A_B = self._rbf(D_A_B_neighbours)
         return RBF_A_B
 
-    def single_example_forward(self, coordinates, topology) -> jnp.array:  # X, mask, residue_idx, chain_labels
+    def single_example_forward(self, coordinates, transforms, topology) -> jnp.array:  # chain_labels
         """The call function written for a single example. It will be jax.vmap transformed in __call__ function.
         Args:
             coordinates: [N, B, 3]
+            transforms: transforms object holding arrays of shapes [N, 3] and [N, 3, 3]
             topology: [N, K]
         Returns: a tuple of edge features with shape [N, K, self.edge_features_dim] and node features
                  [N, self.node_features_dim]. The node features are zeros.
@@ -194,7 +195,13 @@ class ProteinFeatures(nn.Module):
         # Compute distances in primary amino acid sequence and positional embeddings
         offset = topology - jnp.arange(coordinates.shape[0])[:, None]  # [N, K]
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
-        E = jnp.concatenate([positional_embedding, RBF_all], axis=-1)  # concatenate along last axis
+        # Compute inter-residue geometry
+        pairwise_geometries = compute_pairwise_geometries(transforms, topology)  # T_ij, shapes within (N, K, ...)
+        t_features = pairwise_geometries.translations / 10.0  # convert to nanometers
+        O_features = pairwise_geometries.orientations.reshape(topology.shape[0], topology.shape[1], 3*3)  # flatten
+        # Compute features and embed
+        E = jnp.concatenate([positional_embedding, RBF_all, t_features, O_features],
+                            axis=-1)  # concatenate along last axis
         E = self.edge_embeddings(E)  # embed with linear layer
         E = self.norm_edges(E)  # normalize edges
         node_zeros = jnp.zeros((coordinates.shape[0], self.node_features_dim))  # zeros as node features
@@ -304,12 +311,13 @@ class BackboneGNN(nn.Module):
     residual_scale: float = 0.7071
 
     @nn.compact
-    def __call__(self, key, noisy_coordinates, timesteps):
+    def __call__(self, key, noisy_coordinates, transforms, timesteps):
         """
         h_V.shape == (B, N, node_embedding_dim) and h_E.shape == (B, N, K, edge_embedding_dim)
         Args:
             key: random PRNGKey
             noisy_coordinates: noisy coordinates of shape (B, N, 4, 3)
+            transforms: current transforms for protein
             timesteps: timesteps of shape [B,]
         Returns:
         """
@@ -321,7 +329,7 @@ class BackboneGNN(nn.Module):
 
         # Graph featurization
         h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
-                                   node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
+                                   node_features_dim=self.node_embedding_dim)(noisy_coordinates, transforms, topologies)
         # Add timestep embedding to node embeddings
         if self.use_timestep_embedding:
             timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
@@ -540,6 +548,8 @@ class Chroma(nn.Module):
         Returns:
             denoised coordinates
         """
+        # Current transforms
+        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
         # BackboneGNN
         h_V, h_E, topologies = BackboneGNN(node_embedding_dim=self.node_embedding_dim,
                                            edge_embedding_dim=self.edge_embedding_dim,
@@ -548,13 +558,12 @@ class Chroma(nn.Module):
                                            num_gnn_layers=self.num_gnn_layers,
                                            use_timestep_embedding=self.use_timestep_embedding,
                                            dropout=self.dropout,
-                                           residual_scale=self.residual_scale)(key, noisy_coordinates, timesteps)
-
+                                           residual_scale=self.residual_scale)(key, noisy_coordinates,
+                                                                               transforms, timesteps)
         # Interresidue Geometry Prediction
         node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
 
         # Backbone Solver
-        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
         updated_transforms = BackboneSolver(
             num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
 
