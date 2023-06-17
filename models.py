@@ -122,8 +122,8 @@ class ProteinFeatures(nn.Module):
         self.edge_embeddings = nn.Dense(self.edge_features_dim)
         self.norm_edges = nn.LayerNorm()
 
-    def __call__(self, coordinates, topologies):  # X, mask, residue_idx, chain_labels
-        return jax.vmap(self.single_example_forward)(coordinates, topologies)
+    def __call__(self, coordinates, transforms, topologies):  # X, mask, residue_idx, chain_labels
+        return jax.vmap(self.single_example_forward)(coordinates, transforms, topologies)
 
     def _rbf(self, D) -> jnp.array:
         """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to

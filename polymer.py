@@ -146,7 +146,8 @@ def compute_radius_of_gyration(coordinates):
 
 
 def _get_stable_1malpha_obscure(t):
-    """Computes (1-alpha_t) with numerically stable computational primitives expm1 and softplus."""
+    """Computes (1-alpha_t) with numerically stable computational primitives expm1 and softplus.
+    Obscure! Do not use!"""
     gamma = 13.5 - 20.5 * t
     return -jnp.expm1(-jax.nn.softplus(-gamma))
 

@@ -7,9 +7,9 @@ def get_config() -> ml_collections.ConfigDict:
     config = tpu.get_config()
 
     config.use_timestep_embedding = True
-    config.num_gnn_layers = 6
+    config.num_gnn_layers = 3
 
-    config.batch_size = 48
+    config.batch_size = 64
     config.base_learning_rate = 1e-5  # this will need to be tuned
     config.use_constant_lr = True
     config.warmup_epochs = 20

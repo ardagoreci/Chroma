@@ -155,9 +155,8 @@ def train_step(key: jax.random.PRNGKey,
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
         distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
         # Scale the derivative
-        # derivative_snr = jax.vmap(jax.grad(polymer.get_alpha_t))(timesteps)  # derivative of alpha_t used to scale
-        # tau_t = -derivative_snr.reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
-        loss = jnp.mean(distances)  # average over batch dim
+        weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)  # Song et al. 2021 weighting, scale with (1-alpha_t)
+        loss = jnp.mean(weights * distances)  # average over batch dim
         return loss
 
     # Compute gradient
@@ -253,10 +252,10 @@ def create_train_state(rng,
     params = initialize(rng, model, config,
                         local_batch_size=config.batch_size // jax.device_count())
     if 'adaptive_clipping' in config.keys():
-        optimizer = optax.chain(optax.adam(learning_rate_fn),
+        optimizer = optax.chain(optax.lion(learning_rate_fn),  # optax.adam(learning_rate_fn),  #
                                 optax.adaptive_grad_clip(clipping=config.adaptive_clipping))
     else:
-        optimizer = optax.adam(learning_rate_fn)
+        optimizer = optax.lion(learning_rate_fn)  # optax.adam(learning_rate_fn)
 
     opt_state = optimizer.init(params)
     state = TrainState(apply_fn=model.apply,
