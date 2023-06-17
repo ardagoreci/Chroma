@@ -19,40 +19,8 @@ import jax.numpy as jnp
 import jax
 from flax import linen as nn
 from typing import Tuple, NamedTuple
-from protein_graph import sample_random_graph
-from protein_utils import structure_to_transforms, transforms_to_structure, Transforms
-
-
-def gather_edges(features, topology) -> jnp.array:
-    """Utility function that extracts relevant edge features from "features" given graph topology. This function is
-    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
-    Features [N,N,C] at Neighbor indices [N,K] => Neighbor features [N,K,C]
-    Args:
-        features: an array of shape [N, N, C] where N is the number of nodes and C is the number of channels
-        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
-        list of K edges where the elements encode the indices of the jth node
-    Returns: an array of shape [N, K, C] where the elements are gathered from features
-            [N,N,C] at topology [N,K] => edge features [N,K,C]
-    (unit-tested)"""
-    N, N, C = features.shape
-    _, K = topology.shape
-    neighbours = jnp.broadcast_to(jnp.expand_dims(topology, axis=-1), shape=(N, K, C))  # [N, K]=> [N, K, 1]=> [N, K, C]
-    edge_features = jnp.take_along_axis(features, indices=neighbours, axis=1)
-    return edge_features
-
-
-def gather_nodes(features, topology) -> jnp.array:
-    """Utility function that extracts relevant node features from "features" given graph topology. This function is
-    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
-    Features [N,C] at Neighbor indices [N,K] => [N,K,C]
-    Args:
-        features: an array of shape [N, C] where N is the number of nodes and C is the number of channels
-        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
-        list of K edges where the elements encode the indices of the jth node
-    Returns: an array of shape [N, K, C] where the elements are gathered from features
-             [N,C] at topology [N,K] => node features [N,K,C]
-    (unit-tested)"""
-    return jnp.take(features, topology, axis=0)
+from protein_graph import sample_random_graph, gather_nodes, gather_edges
+from geometry import *
 
 
 def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
@@ -387,12 +355,6 @@ class AnisotropicConfidence(NamedTuple):
     lateral_precision: jnp.array
 
 
-class PairwiseGeometries(NamedTuple):
-    """A pairwise geometry that stores Transform objects and associated confidence values."""
-    transforms: Transforms
-    confidences: jnp.array  # this will be changed when switching to Backbone Network B
-
-
 # noinspection PyAttributeOutsideInit
 class PairwiseGeometryPrediction(nn.Module):
     """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given node
@@ -517,7 +479,7 @@ class BackboneSolver(nn.Module):
         p_ij = w_ij / jnp.sum(w_ij, axis=1, keepdims=True)  # sum over j, p_ij.shape == [N, K, 1]
 
         # Compute T_ji, including t_ji and O_ji
-        invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
+        invert_transforms_fn = jax.vmap(jax.vmap(invert_transform))  # acts on [N, K, ...] arrays
         t_ji, O_ji = invert_transforms_fn(t_ij, O_ij)  # T_ij => T_ji
 
         # Perform confidence weighted sums according to formula
@@ -532,21 +494,6 @@ class BackboneSolver(nn.Module):
 
         # Return updated transforms
         return Transforms(translations, orientations)
-
-    @staticmethod
-    def invert_transform(t, O) -> Tuple[jnp.array, jnp.array]:
-        """Computes the inverse of a given transform as T(-1) = (dot(-O(-1), t), O(-1)) where O(-1) is the inverse of
-        the orientation. This method can also be used to compute the inverses of relative transformations as T_ba =
-        T_ab(-1).
-        Args:
-            t: the translation vector of shape [3,]
-            O: the rotation matrix of shape [3, 3]
-        Returns: inverted translation and rotation arrays
-        (unit-tested)
-        """
-        new_t = - jnp.dot(O.T, t)
-        new_O = O.T
-        return new_t, new_O
 
     @staticmethod
     def proj_with_svd(matrix):
@@ -569,24 +516,6 @@ class BackboneSolver(nn.Module):
         intermediate = jnp.matmul(intermediate, u.T)
         rot = jnp.matmul(V, intermediate)
         return rot
-
-    @staticmethod
-    def compose_transforms(transform_a, transform_b) -> Transforms:
-        """Composes two transforms. This method needs to be jax.vmap transformed when the Transforms object passed
-        are of higher rank.
-        Args:
-            transform_a: a Transforms object with arrays of shape [3,] and [3, 3]
-            transform_b: a Transforms object with arrays of shape [3,] and [3, 3]
-
-        (unit-tested)"""
-        t_a = transform_a.translations
-        O_a = transform_a.orientations
-        t_b = transform_b.translations
-        O_b = transform_b.orientations
-
-        translation = t_a + jnp.dot(O_a, t_b)
-        orientation = jnp.dot(O_a, O_b)
-        return Transforms(translation, orientation)
 
 
 class Chroma(nn.Module):
