@@ -10,6 +10,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+# Constants for diffusion schedule (Song et al. 2021)
+B_MAX = 20
+B_MIN = 0.1
+
 
 def diffuse(noise, R, x0, timestep):
     """This method diffuses the coordinates of the polymer up to the given time. The diffusion
@@ -26,10 +30,11 @@ def diffuse(noise, R, x0, timestep):
     (unit-tested)"""
     # Get alpha_t from diffusion schedule
     alpha_t = get_alpha_t(timestep)
+    one_m_alpha_t = get_stable_1malpha(timestep)  # numerically stable implementation of (1 - alpha_t)
     rz = jnp.matmul(R, noise)  # Compute prior rz
 
     # Diffusion Step
-    x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(1 - alpha_t) * rz  # * scale
+    x_t = jnp.sqrt(alpha_t) * x0 + jnp.sqrt(one_m_alpha_t) * rz
     return x_t
 
 
@@ -75,17 +80,21 @@ def rg_confined_covariance(n_atoms, a, b):
 
 
 def get_alpha_t(t):
-    """Computes alpha_t given a timestep according to the log-linear SNR schedule
-    described in Kingma et al. 2021. The log(SNR_max) = 13.5 and log(SNR_min) = -7.0.
-    The diffusion loss is invariant to the schedule as long as the SNR_max and SNR_min
-    are kept the same."""
-    return jax.nn.sigmoid(13.5 - 20.5*t)
+    """Returns the alpha_t value that is equivalent to the perturbation kernel used in Song et al. 2021"""
+    x = -(1/2) * (t**2) * (B_MAX - B_MIN) - t * B_MIN
+    return jnp.exp(x)
 
 
-def SNR(t):
-    """Computes signal-to-noise ratio given a timestep."""
-    y = (13.5 - 20.5*t)
-    return jnp.exp(y)
+def get_stable_1malpha(t):
+    """Numerically stable implementation of (1-alpha_t) with the stable jnp.expm1 primitive."""
+    x = -(1 / 2) * (t ** 2) * (B_MAX - B_MIN) - t * B_MIN
+    return - jnp.expm1(x)
+
+
+def get_beta_t(t):
+    """Returns the ß(t) value that is used in the SDEs. The ß(t) schedule is the same as that used in
+    Song et al. 2021."""
+    return B_MIN + t * (B_MAX - B_MIN)
 
 
 def compute_b(N, B, a):
@@ -134,3 +143,27 @@ def compute_radius_of_gyration(coordinates):
     squared_residuals = jnp.sum(((coordinates - r_o) ** 2), axis=1)
     rg = jnp.sqrt(jnp.average(squared_residuals, axis=0))
     return rg
+
+
+def _get_stable_1malpha_obscure(t):
+    """Computes (1-alpha_t) with numerically stable computational primitives expm1 and softplus.
+    Obscure! Do not use!"""
+    gamma = 13.5 - 20.5 * t
+    return -jnp.expm1(-jax.nn.softplus(-gamma))
+
+
+def _get_alpha_t_obscure(t):
+    """Computes alpha_t given a timestep according to the log-linear SNR schedule
+    described in Kingma et al. 2021. The log(SNR_max) = 13.5 and log(SNR_min) = -7.0.
+    The diffusion loss is invariant to the schedule as long as the SNR_max and SNR_min
+    are kept the same.
+    It is now obscure! Do not use!
+    """
+    return jax.nn.sigmoid(13.5 - 20.5 * t)
+
+
+def _SNR(t):
+    """Computes signal-to-noise ratio given a timestep.
+    Obscure! Do not use!"""
+    y = (13.5 - 20.5 * t)
+    return jnp.exp(y)

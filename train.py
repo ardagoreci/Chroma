@@ -60,11 +60,12 @@ def compute_metrics(x_pred, x0):
 
 def create_learning_rate_fn(config):
     """Creates learning rate schedule."""
+
     def _base_fn(step):
         return config.base_learning_rate
 
     warmup_fn = optax.linear_schedule(
-        init_value=0.0001, end_value=config.base_learning_rate,
+        init_value=0.0, end_value=config.base_learning_rate,
         transition_steps=config.warmup_epochs * config.steps_per_epoch)
     cosine_epochs = max(config.num_epochs - config.warmup_epochs, 1)
     cosine_fn = optax.cosine_decay_schedule(
@@ -136,7 +137,7 @@ def train_step(key: jax.random.PRNGKey,
     R_inverse = batch[2]
     batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
-    timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
+    timesteps = jax.random.uniform(key, minval=1e-3, maxval=1.0, shape=(batch_size,))
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
@@ -150,12 +151,10 @@ def train_step(key: jax.random.PRNGKey,
         x_theta = state.apply_fn(params, key, x_t, timesteps, rngs={'dropout': dropout_key})
         x_theta = x_theta.reshape(x0.shape)
         regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
-        # absolute errors in x space, expanded for broadcasting across batch dimension
+        # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
         distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        derivative_snr = jax.vmap(jax.grad(polymer.SNR))(timesteps)
-        tau_t = ((-0.5) * derivative_snr).reshape(batch_size, 1, 1)  # used to scale the loss in a time-dependent manner
-        loss = jnp.mean(tau_t * distances)  # average over batch dim
+        loss = jnp.mean(distances)  # average over batch dim
         return loss
 
     # Compute gradient
@@ -185,8 +184,14 @@ def eval_step(key, state, batch):
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
     # Predict x0
     x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
+    # Compute metrics as actual loss
+    regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
+    # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
+    offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
+    distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+    weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)
     # Compute metrics as mean squared error
-    return compute_metrics(x_theta, x0)
+    return {'error': jnp.mean(distances * weights)}
 
 
 def denoising_train_step(key: jax.random.PRNGKey,
@@ -250,7 +255,12 @@ def create_train_state(rng,
     """
     params = initialize(rng, model, config,
                         local_batch_size=config.batch_size // jax.device_count())
-    optimizer = optax.adam(learning_rate_fn)
+    if 'adaptive_clipping' in config.keys():
+        optimizer = optax.chain(optax.lion(learning_rate_fn),  # optax.adam(learning_rate_fn),  #
+                                optax.adaptive_grad_clip(clipping=config.adaptive_clipping))
+    else:
+        optimizer = optax.lion(learning_rate_fn)  # optax.adam(learning_rate_fn)
+
     opt_state = optimizer.init(params)
     state = TrainState(apply_fn=model.apply,
                        params=params,
@@ -338,7 +348,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     train_metrics_last_t = time.time()
     logging.info("Initial compilation, this might take some minutes...")
     for step, batch in zip(range(step_offset, num_steps), train_iter):
-        keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.device_count())
+        keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.local_device_count())
         state, metrics = p_train_step(keys, state, batch)
         if step == step_offset:
             logging.info("Initial compilation done.")
@@ -362,7 +372,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
                 eval_metrics = []
                 for _ in range(steps_per_eval):
                     eval_batch = next(test_iter)
-                    keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.device_count())
+                    keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.local_device_count())
                     metrics = p_eval_step(keys, state, eval_batch)
                     eval_metrics.append(metrics)
                 eval_metrics = common_utils.get_metrics(eval_metrics)

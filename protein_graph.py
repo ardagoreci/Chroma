@@ -5,6 +5,38 @@ import jax
 import numpy as np
 
 
+def gather_edges(features, topology) -> jnp.array:
+    """Utility function that extracts relevant edge features from "features" given graph topology. This function is
+    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+    Features [N,N,C] at Neighbor indices [N,K] => Neighbor features [N,K,C]
+    Args:
+        features: an array of shape [N, N, C] where N is the number of nodes and C is the number of channels
+        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
+        list of K edges where the elements encode the indices of the jth node
+    Returns: an array of shape [N, K, C] where the elements are gathered from features
+            [N,N,C] at topology [N,K] => edge features [N,K,C]
+    (unit-tested)"""
+    N, N, C = features.shape
+    _, K = topology.shape
+    neighbours = jnp.broadcast_to(jnp.expand_dims(topology, axis=-1), shape=(N, K, C))  # [N, K]=> [N, K, 1]=> [N, K, C]
+    edge_features = jnp.take_along_axis(features, indices=neighbours, axis=1)
+    return edge_features
+
+
+def gather_nodes(features, topology) -> jnp.array:
+    """Utility function that extracts relevant node features from "features" given graph topology. This function is
+    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
+    Features [N,C] at Neighbor indices [N,K] => [N,K,C]
+    Args:
+        features: an array of shape [N, C] where N is the number of nodes and C is the number of channels
+        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
+        list of K edges where the elements encode the indices of the jth node
+    Returns: an array of shape [N, K, C] where the elements are gathered from features
+             [N,C] at topology [N,K] => node features [N,K,C]
+    (unit-tested)"""
+    return jnp.take(features, topology, axis=0)
+
+
 @jax.jit
 def get_internode_distances(coordinates) -> jnp.array:
     """Computes internode distances for all atoms.

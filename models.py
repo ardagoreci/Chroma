@@ -19,40 +19,8 @@ import jax.numpy as jnp
 import jax
 from flax import linen as nn
 from typing import Tuple, NamedTuple
-from protein_graph import sample_random_graph
-from protein_utils import structure_to_transforms, transforms_to_structure, Transforms
-
-
-def gather_edges(features, topology) -> jnp.array:
-    """Utility function that extracts relevant edge features from "features" given graph topology. This function is
-    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
-    Features [N,N,C] at Neighbor indices [N,K] => Neighbor features [N,K,C]
-    Args:
-        features: an array of shape [N, N, C] where N is the number of nodes and C is the number of channels
-        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
-        list of K edges where the elements encode the indices of the jth node
-    Returns: an array of shape [N, K, C] where the elements are gathered from features
-            [N,N,C] at topology [N,K] => edge features [N,K,C]
-    (unit-tested)"""
-    N, N, C = features.shape
-    _, K = topology.shape
-    neighbours = jnp.broadcast_to(jnp.expand_dims(topology, axis=-1), shape=(N, K, C))  # [N, K]=> [N, K, 1]=> [N, K, C]
-    edge_features = jnp.take_along_axis(features, indices=neighbours, axis=1)
-    return edge_features
-
-
-def gather_nodes(features, topology) -> jnp.array:
-    """Utility function that extracts relevant node features from "features" given graph topology. This function is
-    written for a single example. If used with the batch dimension, it should be jax.vmap transformed.
-    Features [N,C] at Neighbor indices [N,K] => [N,K,C]
-    Args:
-        features: an array of shape [N, C] where N is the number of nodes and C is the number of channels
-        topology: an array of shape [N, K] where K indicates the number of edges and the row at the ith index gives a
-        list of K edges where the elements encode the indices of the jth node
-    Returns: an array of shape [N, K, C] where the elements are gathered from features
-             [N,C] at topology [N,K] => node features [N,K,C]
-    (unit-tested)"""
-    return jnp.take(features, topology, axis=0)
+from protein_graph import sample_random_graph, gather_nodes, gather_edges
+from geometry import *
 
 
 def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
@@ -94,6 +62,7 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     Returns:
         a Tensor of shape (B, dim) of positional embeddings
     """
+    timesteps = timesteps * 1000  # Convert [0,1] scale to [0,1000]
     half = dim // 2
     freqs = jnp.exp(-jnp.log(max_period) * jnp.arange(0, half, dtype=jnp.float32) / half)
     args = timesteps[:, None] * freqs[None]
@@ -151,10 +120,10 @@ class ProteinFeatures(nn.Module):
     def setup(self):
         self.pos_embeddings = PositionalEncodings(self.num_positional_embeddings)
         self.edge_embeddings = nn.Dense(self.edge_features_dim)
-        self.layer_norm = nn.LayerNorm()
+        self.norm_edges = nn.LayerNorm()
 
-    def __call__(self, coordinates, topologies):  # X, mask, residue_idx, chain_labels
-        return jax.vmap(self.single_example_forward)(coordinates, topologies)
+    def __call__(self, coordinates, transforms, topologies):  # X, mask, residue_idx, chain_labels
+        return jax.vmap(self.single_example_forward)(coordinates, transforms, topologies)
 
     def _rbf(self, D) -> jnp.array:
         """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to
@@ -192,10 +161,11 @@ class ProteinFeatures(nn.Module):
         RBF_A_B = self._rbf(D_A_B_neighbours)
         return RBF_A_B
 
-    def single_example_forward(self, coordinates, topology) -> jnp.array:  # X, mask, residue_idx, chain_labels
+    def single_example_forward(self, coordinates, transforms, topology) -> jnp.array:  # chain_labels
         """The call function written for a single example. It will be jax.vmap transformed in __call__ function.
         Args:
             coordinates: [N, B, 3]
+            transforms: transforms object holding arrays of shapes [N, 3] and [N, 3, 3]
             topology: [N, K]
         Returns: a tuple of edge features with shape [N, K, self.edge_features_dim] and node features
                  [N, self.node_features_dim]. The node features are zeros.
@@ -225,8 +195,15 @@ class ProteinFeatures(nn.Module):
         # Compute distances in primary amino acid sequence and positional embeddings
         offset = topology - jnp.arange(coordinates.shape[0])[:, None]  # [N, K]
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
-        E = jnp.concatenate([positional_embedding, RBF_all], axis=-1)  # concatenate along last axis
+        # Compute inter-residue geometry
+        pairwise_geometries = compute_pairwise_geometries(transforms, topology)  # T_ij, shapes within (N, K, ...)
+        t_features = pairwise_geometries.translations / 10.0  # convert to nanometers
+        O_features = pairwise_geometries.orientations.reshape(topology.shape[0], topology.shape[1], 3*3)  # flatten
+        # Compute features and embed
+        E = jnp.concatenate([positional_embedding, RBF_all, t_features, O_features],
+                            axis=-1)  # concatenate along last axis
         E = self.edge_embeddings(E)  # embed with linear layer
+        E = self.norm_edges(E)  # normalize edges
         node_zeros = jnp.zeros((coordinates.shape[0], self.node_features_dim))  # zeros as node features
         return node_zeros, E
 
@@ -253,6 +230,7 @@ class MPNNLayer(nn.Module):
     node_mlp_hidden_dim: int
     dropout: float = 0.1
     scale: int = 60
+    residual_scale: float = 0.7071  # scale skip connections with 1/sqrt(2)
 
     def setup(self):
         # node message MLP
@@ -276,8 +254,10 @@ class MPNNLayer(nn.Module):
         self.norm2 = nn.LayerNorm()
         self.norm3 = nn.LayerNorm()
 
-        # Dropout
-        self.dropout_layer = nn.Dropout(rate=self.dropout, deterministic=False)
+        # Dropout layers
+        self.dropout1 = nn.Dropout(rate=self.dropout, deterministic=False)
+        self.dropout2 = nn.Dropout(rate=self.dropout, deterministic=False)
+        self.dropout3 = nn.Dropout(rate=self.dropout, deterministic=False)
 
         # Position-wise feedforward (acts as node update MLP)
         self.dense = PositionWiseFeedForward(num_hidden=self.node_embedding_dim,
@@ -300,11 +280,11 @@ class MPNNLayer(nn.Module):
         h_message = self.node_mlp(h_EV)
         # Sum to i
         dh = jnp.sum(h_message, axis=-2) / self.scale
-        h_V = self.norm1(h_V + self.dropout_layer(dh))
+        h_V = self.norm1(self.residual_scale * h_V + self.dropout1(dh))
 
         # Position-wise feedforward
         dh = self.dense(h_V)
-        h_V = self.norm2(h_V + self.dropout_layer(dh))
+        h_V = self.norm2(self.residual_scale * h_V + self.dropout2(dh))
 
         # Edge Updates
         h_EV = jax.vmap(cat_neighbours_nodes)(h_V, h_E, topology)
@@ -314,7 +294,7 @@ class MPNNLayer(nn.Module):
 
         # Compute edge update with MLP
         h_update = self.edge_mlp(h_EV)
-        h_E = self.norm3(h_E + self.dropout_layer(h_update))
+        h_E = self.norm3(self.residual_scale * h_E + self.dropout3(h_update))
         return h_V, h_E
 
 
@@ -328,14 +308,16 @@ class BackboneGNN(nn.Module):
     num_gnn_layers: int = 12
     dropout: float = 0.1  # dropout rate
     use_timestep_embedding: bool = True
+    residual_scale: float = 0.7071
 
     @nn.compact
-    def __call__(self, key, noisy_coordinates, timesteps):
+    def __call__(self, key, noisy_coordinates, transforms, timesteps):
         """
         h_V.shape == (B, N, node_embedding_dim) and h_E.shape == (B, N, K, edge_embedding_dim)
         Args:
             key: random PRNGKey
             noisy_coordinates: noisy coordinates of shape (B, N, 4, 3)
+            transforms: current transforms for protein
             timesteps: timesteps of shape [B,]
         Returns:
         """
@@ -347,7 +329,7 @@ class BackboneGNN(nn.Module):
 
         # Graph featurization
         h_V, h_E = ProteinFeatures(edge_features_dim=self.edge_embedding_dim,
-                                   node_features_dim=self.node_embedding_dim)(noisy_coordinates, topologies)
+                                   node_features_dim=self.node_embedding_dim)(noisy_coordinates, transforms, topologies)
         # Add timestep embedding to node embeddings
         if self.use_timestep_embedding:
             timestep_embeddings = timestep_embedding(timesteps, dim=h_V.shape[-1])  # [B, node_embedding_dim]
@@ -360,7 +342,8 @@ class BackboneGNN(nn.Module):
                                  edge_embedding_dim=self.edge_embedding_dim,
                                  edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                  node_mlp_hidden_dim=self.node_mlp_hidden_dim,
-                                 dropout=self.dropout)(h_V, h_E, topologies)
+                                 dropout=self.dropout,
+                                 residual_scale=self.residual_scale)(h_V, h_E, topologies)
 
         return h_V, h_E, topologies
 
@@ -380,12 +363,6 @@ class AnisotropicConfidence(NamedTuple):
     lateral_precision: jnp.array
 
 
-class PairwiseGeometries(NamedTuple):
-    """A pairwise geometry that stores Transform objects and associated confidence values."""
-    transforms: Transforms
-    confidences: jnp.array  # this will be changed when switching to Backbone Network B
-
-
 # noinspection PyAttributeOutsideInit
 class PairwiseGeometryPrediction(nn.Module):
     """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given node
@@ -394,16 +371,31 @@ class PairwiseGeometryPrediction(nn.Module):
 
     def setup(self):
         self.linear = nn.Dense(3 + 3 + self.num_confidence_values)
+        self.node_mlp = nn.Dense(4 * 3)  # 4 atom coordinates for each node
 
     def __call__(self, h_V, h_E):
         batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
-        return batch_pairwise_geometries
+        batch_node_updates = jax.vmap(self.node_coordinate_update)(h_V)
+        return batch_node_updates, batch_pairwise_geometries
+
+    def node_coordinate_update(self, node_embeddings):
+        """Given node embeddings, computes a residual update for all backbone atom coordinates.
+        This allows Chroma to predict all backbone atom coordinates simultaneously, and the denoising
+        objective acts as a version of Noisy Nodes (Godwin et al. 2022) that regularizes deep MPNNs.
+        Args:
+            node_embeddings: node embeddings of shape [N, C]
+        Returns:
+            an array of shape [N, 4, 3] that are residual updates to backbone atom coordinates
+        """
+        output = self.node_mlp(node_embeddings)
+        residual_updates = output.reshape((node_embeddings.shape[0], 4, 3))
+        return residual_updates
 
     def backbone_update_with_confidence(self, pair_embeddings) -> PairwiseGeometries:
         """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
-        embedding, a linear layer predicts a vector for the translation and three additional components that define the
-        Euler axis. See AlphaFold Supplementary information section 1.8.3, Algorithm 23 "Backbone update".
-        This function is written for a single example.
+        embedding, a linear layer predicts a vector for the translation, three additional components that define the
+        Euler axis, and a confidence value. See AlphaFold Supplementary information section 1.8.3, Algorithm 23
+        "Backbone update". This function is written for a single example.
         Args:
             pair_embeddings: [N, K, C]
         Returns:
@@ -495,7 +487,7 @@ class BackboneSolver(nn.Module):
         p_ij = w_ij / jnp.sum(w_ij, axis=1, keepdims=True)  # sum over j, p_ij.shape == [N, K, 1]
 
         # Compute T_ji, including t_ji and O_ji
-        invert_transforms_fn = jax.vmap(jax.vmap(BackboneSolver.invert_transform))  # acts on [N, K, ...] arrays
+        invert_transforms_fn = jax.vmap(jax.vmap(invert_transform))  # acts on [N, K, ...] arrays
         t_ji, O_ji = invert_transforms_fn(t_ij, O_ij)  # T_ij => T_ji
 
         # Perform confidence weighted sums according to formula
@@ -510,21 +502,6 @@ class BackboneSolver(nn.Module):
 
         # Return updated transforms
         return Transforms(translations, orientations)
-
-    @staticmethod
-    def invert_transform(t, O) -> Tuple[jnp.array, jnp.array]:
-        """Computes the inverse of a given transform as T(-1) = (dot(-O(-1), t), O(-1)) where O(-1) is the inverse of
-        the orientation. This method can also be used to compute the inverses of relative transformations as T_ba =
-        T_ab(-1).
-        Args:
-            t: the translation vector of shape [3,]
-            O: the rotation matrix of shape [3, 3]
-        Returns: inverted translation and rotation arrays
-        (unit-tested)
-        """
-        new_t = - jnp.dot(O.T, t)
-        new_O = O.T
-        return new_t, new_O
 
     @staticmethod
     def proj_with_svd(matrix):
@@ -548,24 +525,6 @@ class BackboneSolver(nn.Module):
         rot = jnp.matmul(V, intermediate)
         return rot
 
-    @staticmethod
-    def compose_transforms(transform_a, transform_b) -> Transforms:
-        """Composes two transforms. This method needs to be jax.vmap transformed when the Transforms object passed
-        are of higher rank.
-        Args:
-            transform_a: a Transforms object with arrays of shape [3,] and [3, 3]
-            transform_b: a Transforms object with arrays of shape [3,] and [3, 3]
-
-        (unit-tested)"""
-        t_a = transform_a.translations
-        O_a = transform_a.orientations
-        t_b = transform_b.translations
-        O_b = transform_b.orientations
-
-        translation = t_a + jnp.dot(O_a, t_b)
-        orientation = jnp.dot(O_a, O_b)
-        return Transforms(translation, orientation)
-
 
 class Chroma(nn.Module):
     """The full Chroma network"""
@@ -577,6 +536,7 @@ class Chroma(nn.Module):
     dropout: float = 0.1  # dropout rate
     backbone_solver_iterations: int = 1  # this is not implemented for more than 1 yet.
     use_timestep_embedding: bool = True
+    residual_scale: float = 1.0
 
     @nn.compact
     def __call__(self, key, noisy_coordinates, timesteps):
@@ -588,6 +548,8 @@ class Chroma(nn.Module):
         Returns:
             denoised coordinates
         """
+        # Current transforms
+        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
         # BackboneGNN
         h_V, h_E, topologies = BackboneGNN(node_embedding_dim=self.node_embedding_dim,
                                            edge_embedding_dim=self.edge_embedding_dim,
@@ -595,17 +557,19 @@ class Chroma(nn.Module):
                                            edge_mlp_hidden_dim=self.edge_mlp_hidden_dim,
                                            num_gnn_layers=self.num_gnn_layers,
                                            use_timestep_embedding=self.use_timestep_embedding,
-                                           dropout=self.dropout)(key, noisy_coordinates, timesteps)
-
+                                           dropout=self.dropout,
+                                           residual_scale=self.residual_scale)(key, noisy_coordinates,
+                                                                               transforms, timesteps)
         # Interresidue Geometry Prediction
-        pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
+        node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
 
         # Backbone Solver
-        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
         updated_transforms = BackboneSolver(
             num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
 
         # TransformsToStructure (going back to 3D coordinates)
         denoised_coordinates = jax.vmap(transforms_to_structure)(updated_transforms)
-        # TODO: residual updates for all-atom prediction
+
+        # Residual updates for all-atom prediction
+        denoised_coordinates = denoised_coordinates + node_updates
         return denoised_coordinates
