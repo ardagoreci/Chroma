@@ -154,9 +154,7 @@ def train_step(key: jax.random.PRNGKey,
         # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
         distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        # Scale the derivative
-        weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)  # Song et al. 2021 weighting, scale with (1-alpha_t)
-        loss = jnp.mean(weights * distances)  # average over batch dim
+        loss = jnp.mean(distances)  # average over batch dim
         return loss
 
     # Compute gradient
@@ -186,8 +184,14 @@ def eval_step(key, state, batch):
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
     # Predict x0
     x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
+    # Compute metrics as actual loss
+    regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
+    # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
+    offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
+    distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+    weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)
     # Compute metrics as mean squared error
-    return compute_metrics(x_theta, x0)
+    return {'error': jnp.mean(distances * weights)}
 
 
 def denoising_train_step(key: jax.random.PRNGKey,

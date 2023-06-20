@@ -15,4 +15,7 @@ def get_config() -> ml_collections.ConfigDict:
     config.warmup_epochs = 20
     config.num_epochs = 10_000  # 2 million training steps
 
+    config.steps_per_eval = 100
+    config.steps_per_epoch = 1000
+
     return config
