@@ -20,9 +20,7 @@ for larger matrices than 3 dimensional, this code is written to avoid any
 unintended use of these cores on both GPUs and TPUs.
 """
 import collections
-from typing import List
 import jax.numpy as jnp
-import tree
 
 # Array of 3-component vectors, stored as individual array for
 # each component.
@@ -41,6 +39,10 @@ Rigids = collections.namedtuple('Rigids', ['rot', 'trans'])
 def squared_difference(x, y):
     return jnp.square(x - y)
 
+
+# -----------------------------------------------------------------------------
+# Operations Rigids
+# -----------------------------------------------------------------------------
 
 def invert_rigids(r: Rigids) -> Rigids:
     """Computes group inverse of rigid transformations 'r'."""
@@ -64,6 +66,13 @@ def rigids_mul_rigids(a: Rigids, b: Rigids) -> Rigids:
         vecs_add(a.trans, rots_mul_vecs(a.rot, b.trans)))
 
 
+def rigids_to_tensor_flat12(
+        r: Rigids  # shape (...)
+) -> jnp.ndarray:  # shape (..., 12)
+    """Flat12 encoding: rotation matrix (9 floats) + translation (3 floats)."""
+    return jnp.stack(list(r.rot) + list(r.trans), axis=-1)
+
+
 def rigids_from_3_points(
         x1: Vecs,  # shape (...)
         x2: Vecs,  # shape (...)
@@ -74,8 +83,7 @@ def rigids_from_3_points(
     Jumper et al. (2021) Suppl. Alg. 21 "rigidFrom3Points"
     This creates a set of rigid transformations from 3 points by Gram-Schmidt
     orthogonalization.
-    (Changed from AF codebase to match the output of structure_to_transforms)
-
+    (Changed from AF codebase)
     Args:
         x1: Vecs corresponding to x1 (N atom in the backbone frames)
         x2 (origin): Origin of resulting rigid transformations
@@ -88,7 +96,11 @@ def rigids_from_3_points(
         e0_unnormalized=vecs_sub(x3, x2),
         e1_unnormalized=vecs_sub(x1, x2))
 
-    return Rigids(rot=invert_rots(m), trans=x2)
+    return Rigids(rot=m, trans=x2)
+
+# -----------------------------------------------------------------------------
+# Operations on Vecs and Rots
+# -----------------------------------------------------------------------------
 
 
 def rots_from_two_vecs(e0_unnormalized: Vecs, e1_unnormalized: Vecs) -> Rots:
@@ -203,4 +215,6 @@ def vecs_to_tensor(v: Vecs  # shape (...)
 def rots_to_tensor(r: Rots  # shape (...)
                    ) -> jnp.ndarray:  # shape(..., 3, 3)
     """Converts 'r' to tensor with shape 3, inverse of 'vecs_from_tensor'."""
-    pass
+    return jnp.stack([jnp.stack([r.xx, r.xy, r.xz], axis=-1),
+                      jnp.stack([r.yx, r.yy, r.yz], axis=-1),
+                      jnp.stack([r.zx, r.zy, r.zz], axis=-1)], axis=-1)
