@@ -57,30 +57,38 @@ def invert_rots(m: Rots) -> Rots:
                 m.xz, m.yz, m.zz)
 
 
+def rigids_mul_rigids(a: Rigids, b: Rigids) -> Rigids:
+    """Group composition of Rigids 'a' and 'b'."""
+    return Rigids(
+        rots_mul_rots(a.rot, b.rot),
+        vecs_add(a.trans, rots_mul_vecs(a.rot, b.trans)))
+
+
 def rigids_from_3_points(
-        point_on_neg_x_axis: Vecs,  # shape (...)
-        origin: Vecs,  # shape (...)
-        point_on_xy_plane: Vecs,  # shape (...)
+        x1: Vecs,  # shape (...)
+        x2: Vecs,  # shape (...)
+        x3: Vecs,  # shape (...)
 ) -> Rigids:  # shape (...)
     """Create Rigids from 3 points.
 
     Jumper et al. (2021) Suppl. Alg. 21 "rigidFrom3Points"
-    This creates a set of rigid transformations from 3 points by Gram Schmidt
+    This creates a set of rigid transformations from 3 points by Gram-Schmidt
     orthogonalization.
+    (Changed from AF codebase to match the output of structure_to_transforms)
 
     Args:
-        point_on_neg_x_axis: Vecs corresponding to points on the negative x axis
-        origin: Origin of resulting rigid transformations
-        point_on_xy_plane: Vecs corresponding to points in the xy plane
+        x1: Vecs corresponding to x1 (N atom in the backbone frames)
+        x2 (origin): Origin of resulting rigid transformations
+        x3: Vecs corresponding to points in the xy plane
     Returns:
         Rigid transformations from global frame to local frames derived from
         the input points.
     """
     m = rots_from_two_vecs(
-        e0_unnormalized=vecs_sub(origin, point_on_neg_x_axis),
-        e1_unnormalized=vecs_sub(point_on_xy_plane, origin))
+        e0_unnormalized=vecs_sub(x3, x2),
+        e1_unnormalized=vecs_sub(x1, x2))
 
-    return Rigids(rot=m, trans=origin)
+    return Rigids(rot=invert_rots(m), trans=x2)
 
 
 def rots_from_two_vecs(e0_unnormalized: Vecs, e1_unnormalized: Vecs) -> Rots:
@@ -134,6 +142,14 @@ def vecs_robust_norm(v: Vecs, epsilon: float = 1e-8) -> jnp.ndarray:
     return jnp.sqrt(jnp.square(v.x) + jnp.square(v.y) + jnp.square(v.z) + epsilon)
 
 
+def rots_mul_rots(a: Rots, b: Rots) -> Rots:
+    """Composition of rotations 'a' and 'b'."""
+    c0 = rots_mul_vecs(a, Vecs(b.xx, b.yx, b.zx))
+    c1 = rots_mul_vecs(a, Vecs(b.xy, b.yy, b.zy))
+    c2 = rots_mul_vecs(a, Vecs(b.xz, b.yz, b.zz))
+    return Rots(c0.x, c1.x, c2.x, c0.y, c1.y, c2.y, c0.z, c1.z, c2.z)
+
+
 def rots_mul_vecs(m: Rots, v: Vecs) -> Vecs:
     """Apply rotations 'm' to vectors 'v'."""
     return Vecs(m.xx * v.x + m.xy * v.y + m.xz * v.z,
@@ -176,3 +192,15 @@ def vecs_squared_distance(v1: Vecs, v2: Vecs) -> jnp.ndarray:
     return (squared_difference(v1.x, v2.x) +
             squared_difference(v1.y, v2.y) +
             squared_difference(v1.z, v2.z))
+
+
+def vecs_to_tensor(v: Vecs  # shape (...)
+                   ) -> jnp.ndarray:  # shape(..., 3)
+    """Converts 'v' to tensor with shape 3, inverse of 'vecs_from_tensor'."""
+    return jnp.stack([v.x, v.y, v.z], axis=-1)
+
+
+def rots_to_tensor(r: Rots  # shape (...)
+                   ) -> jnp.ndarray:  # shape(..., 3, 3)
+    """Converts 'r' to tensor with shape 3, inverse of 'vecs_from_tensor'."""
+    pass
