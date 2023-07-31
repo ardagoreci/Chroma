@@ -14,12 +14,8 @@ TODO: sort out the dataclasses/NamedTuple situation so that there is a Transform
  unit-tested most of them and I don't want to break things before they start working.
 """
 # Dependencies
-import flax
-import jax.numpy as jnp
-import jax
 from flax import linen as nn
-from typing import Tuple, NamedTuple
-from protein_graph import sample_random_graph, gather_nodes, gather_edges
+from model.protein_graph import sample_random_graph, gather_edges
 from geometry import *
 
 

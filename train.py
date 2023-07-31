@@ -5,16 +5,15 @@ import jax
 import ml_collections
 import optax
 import time
-from jax import lax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 from flax.training import checkpoints
 from flax.training import common_utils
 from absl import logging
 from clu import metric_writers, periodic_actions
-import input_pipeline
-from models import Chroma
-import polymer
+from data import input_pipeline
+from model.chroma import Chroma
+from model import polymer
 
 
 def create_model(config):
@@ -154,7 +153,8 @@ def train_step(key: jax.random.PRNGKey,
         # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
         distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        loss = jnp.mean(distances)  # average over batch dim
+        weights = - jax.vmap(jax.grad(polymer.get_alpha_t))(timesteps)  # [B,] SNR-derivative scaling
+        loss = jnp.mean(distances * weights)  # average over batch dim
         return loss
 
     # Compute gradient
@@ -189,7 +189,7 @@ def eval_step(key, state, batch):
     # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
     offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
     distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-    weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)
+    weights = jax.vmap(polymer.get_alpha_t)(timesteps)  # jax.vmap(polymer.get_stable_1malpha)(timesteps)
     # Compute metrics as mean squared error
     return {'error': jnp.mean(distances * weights)}
 
