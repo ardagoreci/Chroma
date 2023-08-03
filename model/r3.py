@@ -66,6 +66,16 @@ def rigids_mul_rigids(a: Rigids, b: Rigids) -> Rigids:
         vecs_add(a.trans, rots_mul_vecs(a.rot, b.trans)))
 
 
+def rigids_mul_rots(r: Rigids, m: Rots) -> Rigids:
+    """Compose rigid transformations 'r' with rotations 'm'."""
+    return Rigids(rots_mul_rots(r.rot, m), r.trans)
+
+
+def rigids_mul_vecs(r: Rigids, v: Vecs) -> Vecs:
+    """Apply rigid transforms 'r' to points 'v'."""
+    return vecs_add(rots_mul_vecs(r.rot, v), r.trans)
+
+
 def rigids_to_tensor_flat12(
         r: Rigids  # shape (...)
 ) -> jnp.ndarray:  # shape (..., 12)
@@ -97,6 +107,7 @@ def rigids_from_3_points(
         e1_unnormalized=vecs_sub(x1, x2))
 
     return Rigids(rot=invert_rots(m), trans=x2)
+
 
 # -----------------------------------------------------------------------------
 # Operations on Vecs and Rots
