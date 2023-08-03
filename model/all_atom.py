@@ -8,7 +8,9 @@
 """
 from typing import Union, Tuple
 
-import r3
+import jax
+
+from model import r3
 import jax.numpy as jnp
 from common import residue_constants
 
@@ -24,7 +26,7 @@ def structure_to_transforms(
 
 
 def transforms_to_structure(
-        backbone_frames: r3.Rigids,
+        backbone_frames: r3.Rigids,  # (N)
 ) -> r3.Vecs:  # (N, 4)
     """Computes the backbone coordinates given backbone frames.
     The coordinates are computed using the ideal bond lengths of Gly with the following values:
@@ -41,13 +43,16 @@ def transforms_to_structure(
     Empirically, this has a root-mean-square deviation of 1.0 Angstrom from the true coordinates when given perfect
     transforms. Importantly, the carbon alpha positions are exactly the same."""
 
+    # Expand dims, r3.Rigids with shape (N) to (N, 1)
+    map_atoms_to_global = jax.tree_map(lambda x: x[:, None], backbone_frames)
+
     # Gather the literature position of GLY
     # r3.Vecs with shape (..., 4)
-    lit_positions = gather_literature_position("GLY", backbone_frames.trans.x.shape)  # same shape as backbone frames
+    lit_positions = gather_literature_position("GLY", (backbone_frames.trans.x.shape[0], 4))
 
     # Transform each atom from its local frame to the global frame.
     # r3.Vecs with shape (..., 4)
-    pred_positions = r3.rigids_mul_vecs(backbone_frames, lit_positions)
+    pred_positions = r3.rigids_mul_vecs(map_atoms_to_global, lit_positions)
     return pred_positions
 
 
@@ -59,10 +64,15 @@ def gather_literature_position(
     whose elements are in the given range."""
     positions = residue_constants.rigid_group_atom_positions[residue_name]
     N, CA, C, O = positions[0][2], positions[1][2], positions[2][2], positions[3][2]  # extract coordinates
-    local_coordinates = jnp.stack([N, CA, C, O], axis=0)  # local_coordinates.shape == (4, 3)
+    local_coordinates = jnp.stack([jnp.array(N),
+                                   jnp.array(CA),
+                                   jnp.array(C),
+                                   jnp.array(O)], axis=0)  # local_coordinates.shape == (4, 3)
 
-    # Create Vecs object from local coordinates
-    x, y, z = local_coordinates[:, 0], local_coordinates[:, 1], local_coordinates[:, 2]
+    # Broadcast local coordinates and create Vecs object
+    x = jnp.broadcast_to(jnp.expand_dims(local_coordinates[:, 0], axis=0), shape)
+    y = jnp.broadcast_to(jnp.expand_dims(local_coordinates[:, 1], axis=0), shape)
+    z = jnp.broadcast_to(jnp.expand_dims(local_coordinates[:, 2], axis=0), shape)
     return r3.Vecs(x, y, z)
 
 
