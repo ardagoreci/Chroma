@@ -106,7 +106,7 @@ def rigids_from_3_points(
         e0_unnormalized=vecs_sub(x3, x2),
         e1_unnormalized=vecs_sub(x1, x2))
 
-    return Rigids(rot=invert_rots(m), trans=x2)
+    return Rigids(rot=m, trans=x2)
 
 
 # -----------------------------------------------------------------------------
@@ -226,6 +226,6 @@ def vecs_to_tensor(v: Vecs  # shape (...)
 def rots_to_tensor(r: Rots  # shape (...)
                    ) -> jnp.ndarray:  # shape(..., 3, 3)
     """Converts 'r' to tensor of shape (3, 3) inverse of 'vecs_from_tensor'."""
-    return jnp.stack([jnp.stack([r.xx, r.xy, r.xz], axis=-1),
-                      jnp.stack([r.yx, r.yy, r.yz], axis=-1),
-                      jnp.stack([r.zx, r.zy, r.zz], axis=-1)], axis=-1)
+    return jnp.array([[r.xx, r.xy, r.xz],
+                      [r.yx, r.yy, r.yz],
+                      [r.zx, r.zy, r.zz]])
