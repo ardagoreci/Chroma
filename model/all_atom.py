@@ -61,11 +61,8 @@ def gather_literature_position(
     N, CA, C, O = positions[0][2], positions[1][2], positions[2][2], positions[3][2]  # extract coordinates
     local_coordinates = jnp.stack([N, CA, C, O], axis=0)  # local_coordinates.shape == (4, 3)
 
-    # Broadcast the coordinates to required shape and create a Vecs object
-    broadcast_shape = shape + (3,)  # add the dims for the 3 coordinates
-    x = jnp.broadcast_to(local_coordinates[:, 0], shape=broadcast_shape)
-    y = jnp.broadcast_to(local_coordinates[:, 1], shape=broadcast_shape)
-    z = jnp.broadcast_to(local_coordinates[:, 2], shape=broadcast_shape)
+    # Create Vecs object from local coordinates
+    x, y, z = local_coordinates[:, 0], local_coordinates[:, 1], local_coordinates[:, 2]
     return r3.Vecs(x, y, z)
 
 
