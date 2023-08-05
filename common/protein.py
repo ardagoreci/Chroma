@@ -68,8 +68,7 @@ class Protein:
     chain_index: np.ndarray  # [num_res]
 
     # B-factors, or temperature factors, of each residue (in sq. angstroms units),
-    # representing the displacement of the residue from its ground truth mean
-    # value.
+    # representing the displacement of the residue from its ground truth mean value.
     b_factors: np.ndarray  # [num_res, num_atom_type]
 
     def __post_init__(self):

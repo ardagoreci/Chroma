@@ -143,27 +143,3 @@ def compute_radius_of_gyration(coordinates):
     squared_residuals = jnp.sum(((coordinates - r_o) ** 2), axis=1)
     rg = jnp.sqrt(jnp.average(squared_residuals, axis=0))
     return rg
-
-
-def _get_stable_1malpha_obscure(t):
-    """Computes (1-alpha_t) with numerically stable computational primitives expm1 and softplus.
-    Obscure! Do not use!"""
-    gamma = 13.5 - 20.5 * t
-    return -jnp.expm1(-jax.nn.softplus(-gamma))
-
-
-def _get_alpha_t_obscure(t):
-    """Computes alpha_t given a timestep according to the log-linear SNR schedule
-    described in Kingma et al. 2021. The log(SNR_max) = 13.5 and log(SNR_min) = -7.0.
-    The diffusion loss is invariant to the schedule as long as the SNR_max and SNR_min
-    are kept the same.
-    It is now obscure! Do not use!
-    """
-    return jax.nn.sigmoid(13.5 - 20.5 * t)
-
-
-def _SNR(t):
-    """Computes signal-to-noise ratio given a timestep.
-    Obscure! Do not use!"""
-    y = (13.5 - 20.5 * t)
-    return jnp.exp(y)

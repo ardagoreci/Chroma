@@ -3,6 +3,7 @@ computational costs to O(N) for a system of N atoms. This module defines the ran
 import jax.numpy as jnp
 import jax
 import numpy as np
+import py3Dmol
 
 
 def gather_edges(features, topology) -> jnp.array:

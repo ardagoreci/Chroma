@@ -223,9 +223,20 @@ def vecs_to_tensor(v: Vecs  # shape (...)
     return jnp.stack([v.x, v.y, v.z], axis=-1)
 
 
-def rots_to_tensor(r: Rots  # shape (...)
+def rots_to_tensor(r: Rots  # shape (...)s
                    ) -> jnp.ndarray:  # shape(..., 3, 3)
     """Converts 'r' to tensor of shape (3, 3) inverse of 'vecs_from_tensor'."""
     return jnp.stack([jnp.stack([r.xx, r.yx, r.zx], axis=-1),
                       jnp.stack([r.xy, r.yy, r.zy], axis=-1),
                       jnp.stack([r.xz, r.yz, r.zz], axis=-1)], axis=-1)
+
+
+def rots_from_tensor3x3(
+        m: jnp.ndarray,  # shape (..., 3, 3)
+) -> Rots:  # shape (...)
+    """Convert rotations represented as (3, 3) array to Rots."""
+    assert m.shape[-1] == 3
+    assert m.shape[-2] == 3
+    return Rots(m[..., 0, 0], m[..., 0, 1], m[..., 0, 2],
+                m[..., 1, 0], m[..., 1, 1], m[..., 1, 2],
+                m[..., 2, 0], m[..., 2, 1], m[..., 2, 2])
