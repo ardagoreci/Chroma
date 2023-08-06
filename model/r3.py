@@ -83,6 +83,13 @@ def rigids_to_tensor_flat12(
     return jnp.stack(list(r.rot) + list(r.trans), axis=-1)
 
 
+def rots_to_tensor_flat9(
+        rot: Rots  # shape (...)
+) -> jnp.ndarray:  # shape (..., 9)
+    """Flat9 encoding of a rotation matrix (9 floats)."""
+    return jnp.stack(list(rot), axis=-1)
+
+
 def rigids_from_3_points(
         x1: Vecs,  # shape (...)
         x2: Vecs,  # shape (...)

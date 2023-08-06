@@ -75,7 +75,7 @@ def gather_literature_position(
     return r3.Vecs(x, y, z)
 
 
-def compute_pairwise_geometries(
+def compute_pairwise_frames(
         backbone_frames: r3.Rigids,  # (N)
         topology: jnp.ndarray  # (N, K)
 ) -> r3.Rigids:

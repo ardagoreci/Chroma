@@ -9,10 +9,11 @@ The main components include:
 This module includes all components that are trainable.
 """
 # Dependencies
+import jax.random
 from flax import linen as nn
 from model.protein_graph import sample_random_graph, gather_edges
 from model.geometry import *
-from model import r3
+from model import r3, all_atom
 
 
 def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
@@ -115,10 +116,16 @@ class ProteinFeatures(nn.Module):
         self.edge_embeddings = nn.Dense(self.edge_features_dim)
         self.norm_edges = nn.LayerNorm()
 
-    def __call__(self, coordinates, transforms, topologies):  # X, mask, residue_idx, chain_labels
+    def __call__(
+            self,
+            coordinates: jnp.ndarray,
+            transforms: r3.Rigids,
+            topologies: jnp.ndarray
+            # X, mask, residue_idx, chain_labels
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return jax.vmap(self.single_example_forward)(coordinates, transforms, topologies)
 
-    def _rbf(self, D) -> jnp.array:
+    def _rbf(self, D) -> jnp.ndarray:
         """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to
         effectively encode the distance between residues. Note: this function is written for a single example.
         Args:
@@ -154,11 +161,34 @@ class ProteinFeatures(nn.Module):
         RBF_A_B = self._rbf(D_A_B_neighbours)
         return RBF_A_B
 
-    def single_example_forward(self, coordinates, transforms, topology) -> jnp.array:  # chain_labels
+    def _get_pairwise_frame_features(
+            self,
+            pairwise_frames: r3.Rigids  # shape (N, K)
+    ) -> jnp.ndarray:  # shape (N, K, 9 + 3 * self.num_rbf)
+        """Computes pairwise frame features (interresidue transforms). The rotation features are the flattened
+        rotation matrix, and the translation features are the x, y, z axes of the translation vector encoded
+        with Gaussian RBFs."""
+        N, K = pairwise_frames.trans.x.shape
+        rot_features = r3.rots_to_tensor_flat9(pairwise_frames.rot)  # (N, K, 9)
+
+        # Translation features
+        translations = r3.vecs_to_tensor(pairwise_frames.trans)  # (N, K, 3)
+        trans_rbfs = jax.vmap(self._rbf)(translations)  # (N, K, 3, self.num_rbf)
+        trans_features = trans_rbfs.reshape(N, K, -1)  # (N, K, 3 * self.num_rbf)
+
+        # Concatenate features along last axis
+        return jnp.concatenate([rot_features, trans_features], axis=-1)
+
+    def single_example_forward(
+            self,
+            coordinates: jnp.ndarray,  # (N, 4, 3)
+            transforms: r3.Rigids,  # (N)
+            topology: jnp.ndarray  # (N, K)
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """The call function written for a single example. It will be jax.vmap transformed in __call__ function.
         Args:
             coordinates: [N, B, 3]
-            transforms: transforms object holding arrays of shapes [N, 3] and [N, 3, 3]
+            transforms: r3.Rigids object describing current transforms of the protein
             topology: [N, K]
         Returns: a tuple of edge features with shape [N, K, self.edge_features_dim] and node features
                  [N, self.node_features_dim]. The node features are zeros.
@@ -191,12 +221,11 @@ class ProteinFeatures(nn.Module):
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
 
         # Compute inter-residue geometry  TODO: change required for r3
-        pairwise_geometries = compute_pairwise_geometries(transforms, topology)  # T_ij, shapes within (N, K, ...)
-        t_features = pairwise_geometries.translations / 10.0  # convert to nanometers
-        O_features = pairwise_geometries.orientations.reshape(topology.shape[0], topology.shape[1], 3 * 3)  # flatten
+        pairwise_frames = all_atom.compute_pairwise_frames(transforms, topology)  # T_ij (N, K)
+        interresidue_transforms = self._get_pairwise_frame_features(pairwise_frames)
+
         # Compute features and embed
-        E = jnp.concatenate([positional_embedding, RBF_all, t_features, O_features],
-                            axis=-1)  # concatenate along last axis
+        E = jnp.concatenate([positional_embedding, RBF_all, interresidue_transforms], axis=-1)
         E = self.edge_embeddings(E)  # embed with linear layer
         E = self.norm_edges(E)  # normalize edges
         node_zeros = jnp.zeros((coordinates.shape[0], self.node_features_dim))  # zeros as node features
@@ -306,15 +335,22 @@ class BackboneGNN(nn.Module):
     residual_scale: float = 0.7071
 
     @nn.compact
-    def __call__(self, key, noisy_coordinates, transforms, timesteps):
+    def __call__(
+            self,
+            key: jax.random.PRNGKey,
+            noisy_coordinates: jnp.ndarray,
+            transforms: r3.Rigids,
+            timesteps: jnp.ndarray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         h_V.shape == (B, N, node_embedding_dim) and h_E.shape == (B, N, K, edge_embedding_dim)
         Args:
             key: random PRNGKey
             noisy_coordinates: noisy coordinates of shape (B, N, 4, 3)
-            transforms: current transforms for protein
+            transforms: r3.Rigids object describing the current transforms for protein
             timesteps: timesteps of shape [B,]
         Returns:
+            node embeddings (h_V), edge embeddings (h_E), topologies
         """
         B, N, _, _ = noisy_coordinates.shape
         keys = jax.random.split(key, num=B)  # keys.shape == (B,2)
@@ -361,7 +397,10 @@ class AnisotropicConfidence(NamedTuple):
 
 class PairwiseGeometries(NamedTuple):
     """A pairwise geometry that stores Transform objects and associated confidence values."""
-    pairwise_frames: r3.Rigids
+    pairwise_frames: r3.Rigids  # as T_ji
+    # T_ji, 'This is how you would go from my position to the real position of i' - said by edge j
+
+    # Edge wise confidence scalars that indicate how confident the network is from its prediction
     confidences: jnp.array  # this will be changed when switching to Backbone Network B
 
 
@@ -369,7 +408,8 @@ class PairwiseGeometries(NamedTuple):
 class PairwiseGeometryPrediction(nn.Module):
     """Implements the inter-residue geometry prediction that predicts pairwise transforms and confidences given node
     embeddings and edge embeddings.
-    TODO: this prediction also needs to change to handle objects as r3.Rigids and rotations
+    TODO: the get_rotation_matrix can be integrated into r3.py so that I can just call that
+     instead of having it here as a static method. DeepMind made it into a quat_affine.py module.
     """
     num_confidence_values: int = 1  # variable depending on whether isotropic or anisotropic confidences are used
 
@@ -413,13 +453,16 @@ class PairwiseGeometryPrediction(nn.Module):
         confidences = output[:, :, :self.num_confidence_values]
         translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10.0  # predict
         # translations in nanometers, convert to Angstroms
+
         # Compute Rotations
         get_rotation_matrix_fn = jax.vmap(jax.vmap(PairwiseGeometryPrediction._get_rotation_matrix))  # pretend N and
         # K dimensions are batch dim to vectorize function with jax.vmap
         rotations = get_rotation_matrix_fn(output[:, :, self.num_confidence_values + 3:])
+
         # Return pairwise geometries
-        transforms = Transforms(translations=translations, orientations=rotations)
-        pairwise_geometries = PairwiseGeometries(transforms=transforms, confidences=confidences)
+        pairwise_frames = r3.Rigids(r3.rots_from_tensor3x3(rotations),
+                                    r3.vecs_from_tensor(translations))
+        pairwise_geometries = PairwiseGeometries(pairwise_frames, confidences)
         return pairwise_geometries
 
     @staticmethod
@@ -453,11 +496,12 @@ class BackboneSolver(nn.Module):
     num_iterations: int = 1  # for backbone network B, num_iterations = 10
 
     @nn.compact
-    def __call__(self,
-                 transforms: r3.Rigids,  # (B, N)
-                 pairwise_geometries: Tuple[r3.Rigids, jnp.ndarray],  # (B, N, K)
-                 topology  # (B, N, K)
-                 ) -> r3.Rigids:
+    def __call__(
+            self,
+            transforms: r3.Rigids,  # (B, N)
+            pairwise_geometries: Tuple[r3.Rigids, jnp.ndarray],  # (B, N, K)
+            topology  # (B, N, K)
+    ) -> r3.Rigids:
         """
         Args:
             transforms: a r3.Rigids describing the current pose
@@ -468,10 +512,11 @@ class BackboneSolver(nn.Module):
         return batch_update_frames(transforms, pairwise_geometries, topology)
 
     @staticmethod
-    def update_frames(backbone_frames: r3.Rigids,  # (N)
-                      pairwise_geometries: PairwiseGeometries,  # (N, K)
-                      topology  # (N, K)
-                      ) -> r3.Rigids:
+    def update_frames(
+            backbone_frames: r3.Rigids,  # (N)
+            pairwise_geometries: PairwiseGeometries,  # (N, K)
+            topology  # (N, K)
+    ) -> r3.Rigids:
         """Updates the frame of a single residue i given the pairwise geometries of its neighbours.
         The method notation is written to closely follow the notation in the Chroma Paper, section E.2.
         Note: this method will be jax.vmap transformed for the batch dimension.
@@ -481,7 +526,6 @@ class BackboneSolver(nn.Module):
                                  and pairwise frames as a r3.Rigids object of shape (N, K)
             topology: graph topology of shape [N, K]
         Returns: updated frames
-        TODO:
         """
 
         # Gather current transforms of edge frames
@@ -491,8 +535,8 @@ class BackboneSolver(nn.Module):
         w_ij = pairwise_geometries.confidences  # [N, K], isotropic confidence
         p_ij = w_ij / jnp.sum(w_ij, axis=1, keepdims=True)  # sum over j, p_ij.shape == [N, K]
 
-        # Invert T_ij
-        T_ji = r3.invert_rigids(pairwise_geometries.pairwise_frames)  # (N, K)
+        # T_ji as network prediction (I hypothesize it will lead to faster learning, as inversion of T_ij is nontrivial)
+        T_ji = pairwise_geometries.pairwise_frames  # r3.invert_rigids(pairwise_geometries.pairwise_frames)  # (N, K)
 
         #  Compose transforms: T_j and T_ji
         pred_T_i_per_edge = r3.rigids_mul_rigids(T_j, T_ji)
@@ -503,7 +547,7 @@ class BackboneSolver(nn.Module):
         #  Project rots with SVD so they remain valid rotations
         projector = jax.vmap(BackboneSolver.proj_with_svd)  # acts on [N, 3, 3]
         rot_array = projector(r3.rots_to_tensor(pred_T_i_averages.rot))
-        # TODO: the projection somehow invert my rotations (I hadn't seen this in the previous version of the solver),
+        # TODO: the projection somehow inverts my rotations (I hadn't seen this in the previous version of the solver),
         #  I have to correct it:
         pred_T_i = r3.Rigids(rot=r3.invert_rots(r3.rots_from_tensor3x3(rot_array)),
                              trans=pred_T_i_averages.trans)
@@ -572,8 +616,7 @@ class Chroma(nn.Module):
         node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
 
         # Backbone Solver
-        updated_transforms = BackboneSolver(
-            num_iterations=self.backbone_solver_iterations)(transforms, pairwise_geometries, topologies)
+        updated_transforms = BackboneSolver()(transforms, pairwise_geometries, topologies)
 
         # TransformsToStructure (going back to 3D coordinates)
         denoised_coordinates = jax.vmap(transforms_to_structure)(updated_transforms)
