@@ -153,7 +153,7 @@ def train_step(key: jax.random.PRNGKey,
         # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
         offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
         distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        weights = - jax.vmap(jax.grad(polymer.get_alpha_t))(timesteps)  # [B,] SNR-derivative scaling
+        weights = jnp.clip(polymer.SNR(timesteps), a_max=5)  # Min-SNR-gamma scaling
         loss = jnp.mean(distances * weights)  # average over batch dim
         return loss
 
@@ -189,7 +189,7 @@ def eval_step(key, state, batch):
     # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
     offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
     distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-    weights = jax.vmap(polymer.get_alpha_t)(timesteps)  # jax.vmap(polymer.get_stable_1malpha)(timesteps)
+    weights = jnp.clip(polymer.SNR(timesteps), a_max=5)  # Min-SNR-gamma scaling
     # Compute metrics as mean squared error
     return {'error': jnp.mean(distances * weights)}
 
@@ -256,10 +256,13 @@ def create_train_state(rng,
     params = initialize(rng, model, config,
                         local_batch_size=config.batch_size // jax.device_count())
     if 'adaptive_clipping' in config.keys():
-        optimizer = optax.chain(optax.lion(learning_rate_fn),  # optax.adam(learning_rate_fn),  #
-                                optax.adaptive_grad_clip(clipping=config.adaptive_clipping))
+        optimizer = optax.chain(optax.lion(learning_rate_fn, weight_decay=config.weight_decay),
+                                optax.adaptive_grad_clip(config.adaptive_clipping))
+    elif 'global_clipping_value' in config.keys():
+        optimizer = optax.chain(optax.lion(learning_rate_fn, weight_decay=config.weight_decay),
+                                optax.clip_by_global_norm(config.global_clipping_value))
     else:
-        optimizer = optax.lion(learning_rate_fn)  # optax.adam(learning_rate_fn)
+        optimizer = optax.lion(learning_rate_fn)
 
     opt_state = optimizer.init(params)
     state = TrainState(apply_fn=model.apply,

@@ -97,6 +97,10 @@ def get_beta_t(t):
     return B_MIN + t * (B_MAX - B_MIN)
 
 
+def SNR(t):
+    return get_alpha_t(t) / get_stable_1malpha(t)
+
+
 def compute_b(N, B, a):
     """This method computes b given the global scaling factor a. See section C.3.2 in Chroma Paper for the derivation
     of the formula. The derivation makes a power law approximation for the radius of gyration in the form r*(N**v)
