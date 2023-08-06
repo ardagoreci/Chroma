@@ -26,7 +26,7 @@ def coordinates_to_backbone_frames(
 
 def backbone_frames_to_coordinates(
         backbone_frames: r3.Rigids,  # (N)
-) -> r3.Vecs:  # (N, 4)
+) -> jnp.ndarray:  # (N, 4, 3)
     """Computes the backbone coordinates given backbone frames.
     The coordinates are computed using the ideal bond lengths of Gly with the following values:
     'GLY': ['N': (-0.572, 1.337, 0.000)],
@@ -52,7 +52,7 @@ def backbone_frames_to_coordinates(
     # Transform each atom from its local frame to the global frame.
     # r3.Vecs with shape (..., 4)
     pred_positions = r3.rigids_mul_vecs(map_atoms_to_global, lit_positions)
-    return pred_positions
+    return r3.vecs_to_tensor(pred_positions)
 
 
 def gather_literature_position(

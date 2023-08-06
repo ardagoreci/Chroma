@@ -449,7 +449,7 @@ class PairwiseGeometryPrediction(nn.Module):
                         [3,3] that are derived from quaternion predictions from the neural network.
             *confidences: an array of shape [N, K, self.num_confidence_values] encoding the confidence values
         """
-        output = self.linear(pair_embeddings)  # [N,K, self.num_confidence_values+3+3]
+        output = self.linear(pair_embeddings)  # [N,K, 1+3+3]
         confidences = output[:, :, :self.num_confidence_values]
         translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10.0  # predict
         # translations in nanometers, convert to Angstroms
@@ -532,7 +532,7 @@ class BackboneSolver(nn.Module):
         T_j = jax.tree_map(lambda x: gather_nodes(x, topology), backbone_frames)  # (N, K)
 
         # Normalize confidences
-        w_ij = pairwise_geometries.confidences  # [N, K], isotropic confidence
+        w_ij = jnp.squeeze(pairwise_geometries.confidences, axis=-1)  # [N, K], isotropic confidence
         p_ij = w_ij / jnp.sum(w_ij, axis=1, keepdims=True)  # sum over j, p_ij.shape == [N, K]
 
         # T_ji as network prediction (I hypothesize it will lead to faster learning, as inversion of T_ij is nontrivial)
@@ -601,7 +601,8 @@ class Chroma(nn.Module):
             denoised coordinates
         """
         # Current transforms
-        transforms = jax.vmap(structure_to_transforms)(noisy_coordinates)
+        transforms = all_atom.coordinates_to_backbone_frames(noisy_coordinates)  # (B, N)
+
         # BackboneGNN
         h_V, h_E, topologies = BackboneGNN(node_embedding_dim=self.node_embedding_dim,
                                            edge_embedding_dim=self.edge_embedding_dim,
@@ -612,6 +613,7 @@ class Chroma(nn.Module):
                                            dropout=self.dropout,
                                            residual_scale=self.residual_scale)(key, noisy_coordinates,
                                                                                transforms, timesteps)
+
         # Interresidue Geometry Prediction
         node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
 
@@ -619,7 +621,7 @@ class Chroma(nn.Module):
         updated_transforms = BackboneSolver()(transforms, pairwise_geometries, topologies)
 
         # TransformsToStructure (going back to 3D coordinates)
-        denoised_coordinates = jax.vmap(transforms_to_structure)(updated_transforms)
+        denoised_coordinates = jax.vmap(all_atom.backbone_frames_to_coordinates)(updated_transforms)
 
         # Residual updates for all-atom prediction
         denoised_coordinates = denoised_coordinates + node_updates
