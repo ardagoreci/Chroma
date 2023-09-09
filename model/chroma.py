@@ -16,10 +16,10 @@ from model.geometry import *
 from model import r3, all_atom
 
 
-def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
-    """Utility function that concatenates node embeddings with that of its neighbours given graph topology. Concatenate
-    ij with j. This function is written for a single example. If used with the batch dimension, it should be
-    jax.vmap transformed.
+def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.ndarray:
+    """Utility function that concatenates node embeddings with that of the edge embeddings of its neighbours
+    given graph topology. Concatenate ij with j. This function is written for a single example. If used with the batch
+    dimension, it should be jax.vmap transformed.
     Args:
         h_nodes: node embeddings of shape [N, C]
         h_edges: edge embeddings of shape [N, K, C]
@@ -31,7 +31,7 @@ def cat_neighbours_nodes(h_nodes, h_edges, topology) -> jnp.array:
     return h_nn
 
 
-def compute_distances(a, b) -> jnp.array:
+def compute_distances(a, b) -> jnp.ndarray:
     """A function that computes an inter-atomic distance matrix given two arrays a and b encoding the distances.
     Args:
         a: an array of shape [N, 3]
@@ -46,7 +46,7 @@ def compute_distances(a, b) -> jnp.array:
     return dists
 
 
-def timestep_embedding(timesteps, dim, max_period=10000):
+def timestep_embedding(timesteps, dim, max_period=10000) -> jnp.ndarray:
     """
     Create sinusoidal timestep embeddings.
     Args:
@@ -108,7 +108,7 @@ class ProteinFeatures(nn.Module):
     edge_features_dim: int
     node_features_dim: int
     num_positional_embeddings: int = 16
-    num_rbf: int = 16
+    num_rbf: int = 32
     num_chain_embeddings: int = 32
 
     def setup(self):
@@ -125,21 +125,17 @@ class ProteinFeatures(nn.Module):
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return jax.vmap(self.single_example_forward)(coordinates, transforms, topologies)
 
-    def _rbf(self, D) -> jnp.ndarray:
+    def _rbf(self, D, d_min, d_max) -> jnp.ndarray:
         """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to
         effectively encode the distance between residues. Note: this function is written for a single example.
         Args:
             D: an array encoding the distances of shape [N, K] where N is the number of residues, K is the
             number of edges
+            d_min: lower limit of RBFs in Angstroms
+            d_max: upper limit of RBFs in Angstroms
         Returns: an array of shape [N, K, self.num_rbf] encoding distances in the form of radial basis functions
-
-        TODO: this function was written for a nearest neighbour approach. 2 and 22 Angstroms are likely completely
-         fine for that purpose, as it is unlikely that your nearest neighbours are further away than 22 Angstroms.
-         However, when I am doing the random graph neural networks with connections to atoms that can be really far
-         away, this might not cut it. I might have to expand the range and add more radial basis functions - should be
-         a simple ratio calculation given the desired range.
         """
-        D_min, D_max, D_count = 2., 42., self.num_rbf
+        D_min, D_max, D_count = d_min, d_max, self.num_rbf
         D_mu = jnp.linspace(D_min, D_max, D_count)
         D_mu = D_mu.reshape((1, 1, -1))  # (1, 1, 1, -1) for batched version of function
         D_sigma = (D_max - D_min) / D_count
@@ -158,7 +154,7 @@ class ProteinFeatures(nn.Module):
         """
         D_A_B = compute_distances(A, B)  # [N, N]
         D_A_B_neighbours = gather_edges(D_A_B[:, :, None], topology)[:, :, 0]  # [N, K]
-        RBF_A_B = self._rbf(D_A_B_neighbours)
+        RBF_A_B = self._rbf(D_A_B_neighbours, d_min=2.0, d_max=42.0)  # between 2.0 and 42.0 Angstroms
         return RBF_A_B
 
     def _get_pairwise_frame_features(
@@ -173,7 +169,7 @@ class ProteinFeatures(nn.Module):
 
         # Translation features
         translations = r3.vecs_to_tensor(pairwise_frames.trans)  # (N, K, 3)
-        trans_rbfs = jax.vmap(self._rbf)(translations)  # (N, K, 3, self.num_rbf)
+        trans_rbfs = jax.vmap(self._rbf, in_axes=(0, None, None))(translations, -20.0, 20.0)  # (N, K, 3, self.num_rbf)
         trans_features = trans_rbfs.reshape(N, K, -1)  # (N, K, 3 * self.num_rbf)
 
         # Concatenate features along last axis
@@ -417,8 +413,8 @@ class PairwiseGeometryPrediction(nn.Module):
         self.linear = nn.Dense(3 + 3 + self.num_confidence_values)
         self.node_mlp = nn.Dense(4 * 3)  # 4 atom coordinates for each node
 
-    def __call__(self, h_V, h_E):
-        batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_E)
+    def __call__(self, h_V, h_E, topologies):
+        batch_pairwise_geometries = jax.vmap(self.backbone_update_with_confidence)(h_V, h_E, topologies)
         batch_node_updates = jax.vmap(self.node_coordinate_update)(h_V)
         return batch_node_updates, batch_pairwise_geometries
 
@@ -435,13 +431,16 @@ class PairwiseGeometryPrediction(nn.Module):
         residual_updates = output.reshape((node_embeddings.shape[0], 4, 3))
         return residual_updates
 
-    def backbone_update_with_confidence(self, pair_embeddings) -> PairwiseGeometries:
-        """Given an embedding, computes a quaternion for the rotation and a vector for the translation. Given an
-        embedding, a linear layer predicts a vector for the translation, three additional components that define the
-        Euler axis, and a confidence value. See AlphaFold Supplementary information section 1.8.3, Algorithm 23
-        "Backbone update". This function is written for a single example.
+    def backbone_update_with_confidence(self, node_embeddings, pair_embeddings, topology) -> PairwiseGeometries:
+        """Given the edge and node embeddings, computes a quaternion for the rotation and a vector for the translation.
+        The edge embedding and the node embedding is concatenated, and a linear layer predicts a vector for the
+        translation, three additional components that define the Euler axis, and a confidence value. See AlphaFold
+        Supplementary information section 1.8.3, Algorithm 23 "Backbone update". This function is written for a
+        single example.
         Args:
+            node_embeddings: [N, C]
             pair_embeddings: [N, K, C]
+            topology: graph topology [N, K]
         Returns:
             a tuple of (translations, rotations, confidences) where:
             *translations: an array of shape [N, K, 3] encoding a translation in 3D space (units of nanometers)
@@ -449,7 +448,8 @@ class PairwiseGeometryPrediction(nn.Module):
                         [3,3] that are derived from quaternion predictions from the neural network.
             *confidences: an array of shape [N, K, self.num_confidence_values] encoding the confidence values
         """
-        output = self.linear(pair_embeddings)  # [N,K, 1+3+3]
+        h_EV = cat_neighbours_nodes(node_embeddings, pair_embeddings, topology)
+        output = self.linear(h_EV)  # [N, K, 1+3+3]
         confidences = output[:, :, :self.num_confidence_values]
         translations = output[:, :, self.num_confidence_values:self.num_confidence_values + 3] * 10.0  # predict
         # translations in nanometers, convert to Angstroms
@@ -615,7 +615,7 @@ class Chroma(nn.Module):
                                                                                transforms, timesteps)
 
         # Interresidue Geometry Prediction
-        node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E)
+        node_updates, pairwise_geometries = PairwiseGeometryPrediction()(h_V, h_E, topologies)
 
         # Backbone Solver
         updated_transforms = BackboneSolver()(transforms, pairwise_geometries, topologies)
