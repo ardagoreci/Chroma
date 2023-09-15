@@ -10,8 +10,7 @@ import jax
 import jax.numpy as jnp
 from model import r3, protein_graph
 from common import residue_constants
-from typing import Tuple
-from typing import NamedTuple, Tuple
+from typing import NamedTuple, Tuple, Optional
 
 
 def coordinates_to_backbone_frames(
@@ -95,4 +94,55 @@ def compute_pairwise_frames(
     # - said by edge j
     return T_ij
 
+
+def frame_aligned_point_error(
+        pred_frames: r3.Rigids,  # shape (num_frames)
+        target_frames: r3.Rigids,  # shape (num_frames)
+        pred_positions: r3.Vecs,  # shape (num_positions)
+        target_positions: r3.Vecs,  # shape (num_positions)
+        # length_scale: float = 10.0,  # 10 Angstroms
+        l1_clamp_distance: Optional[float] = None,
+        epsilon=1e-4
+) -> jnp.ndarray:  # shape ()
+    """Measure point error under different alignments.
+
+    Jumper et al. (2021) Suppl. Alg. 28 "computeFAPE"
+    Computes error between two structures with B points under A alignments derived
+    from the given pairs of frames.
+    Args:
+        pred_frames: num_frames reference frames for 'pred_positions'.
+        target_frames: num_frames reference frames for 'target_positions'.
+        pred_positions: num_positions predicted positions of the structure.
+        target_positions: num_positions target positions of the structure.
+        length_scale: length scale to divide loss by.
+        l1_clamp_distance: Distance cutoff on error beyond which gradients will
+          be zero.
+        epsilon: small value used to regularize denominator for masked average.
+    Returns:
+        Masked Frame Aligned Point Error.
+    """
+
+    # Compute array of predicted positions in the predicted frames.
+    # r3.Vecs (num_frames, num_positions)
+    local_pred_pos = r3.rigids_mul_vecs(
+        jax.tree_map(lambda r: r[:, None], r3.invert_rigids(pred_frames)),
+        jax.tree_map(lambda x: x[None, :], pred_positions))
+
+    # Compute array of target positions in the target frames.
+    # r3.Vecs (num_frames, num_positions)
+    local_target_pos = r3.rigids_mul_vecs(
+        jax.tree_map(lambda r: r[:, None], r3.invert_rigids(target_frames)),
+        jax.tree_map(lambda x: x[None, :], target_positions))
+
+    # Compute errors between the structures
+    # jnp.ndarray (num_frames, num_positions)
+    error_dist = jnp.sqrt(
+        r3.vecs_squared_distance(local_pred_pos, local_target_pos)
+        + epsilon)
+
+    # Normalized mean
+    if l1_clamp_distance:
+        error_dist = jnp.clip(error_dist, a_min=0, a_max=l1_clamp_distance)
+    fape = jnp.mean(error_dist) / 10.0  # scale by the length scale
+    return fape
 

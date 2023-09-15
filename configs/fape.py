@@ -10,9 +10,12 @@ def get_config() -> ml_collections.ConfigDict:
     config.use_timestep_embedding = True
     config.num_gnn_layers = 3
 
+    # Loss Hyperparameters
+    config.fape_clamp_rate = 0.9  # FAPE is clamped at 10.0 Angstroms for 90% of training examples
+
     # Optimization details
     config.batch_size = 28
-    config.base_learning_rate = 1e-5  # this will need to be tuned
+    config.base_learning_rate = 1e-3  # this will need to be tuned
     config.use_constant_lr = True
     config.warmup_epochs = 20
     config.num_epochs = 5_000  # 1 million training steps
