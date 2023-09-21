@@ -2,14 +2,16 @@
 
 import flax
 import jax
+from flax.struct import TNode
 from jax import vmap
 import ml_collections
 import optax
 import time
 import jax.numpy as jnp
-from flax.training.train_state import TrainState
+from typing import Any, Optional
 from flax.training import checkpoints
 from flax.training import common_utils
+from flax.training.train_state import TrainState
 from absl import logging
 from clu import metric_writers, periodic_actions
 from data import input_pipeline
@@ -117,10 +119,33 @@ def create_denoising_input_iters(config):
     return train_iter, test_iter
 
 
+class TrainStateWithEMA(TrainState):
+    """Implements a TrainState with exponential moving average of model params"""
+    ema_params: Optional[Any]
+    ema_decay_rate: Optional[float]
+
+    def apply_grads_with_ema(self, *, grads, **kwargs):
+        new_state = self.apply_gradients(grads=grads)
+        new_state = self.update_ema(new_state)
+        return new_state
+
+    def update_ema(self, new_state):
+        new_ema = jax.tree_map(lambda ema_params, params: ema_params * self.ema_decay_rate + (1 - self.ema_decay_rate) * params,
+                               self.ema_params, new_state.params)
+        new_state = TrainStateWithEMA(apply_fn=new_state.apply_fn,
+                                      params=new_state.params,
+                                      tx=new_state.tx,
+                                      step=new_state.step,
+                                      opt_state=new_state.opt_state,
+                                      ema_params=new_ema,
+                                      ema_decay_rate=new_state.ema_decay_rate)
+        return new_state
+
+
 def train_step(key: jax.random.PRNGKey,
                state: TrainState,
                batch,
-               clamp_fape: bool) -> TrainState:
+               clamp_fape: bool) -> TrainStateWithEMA:
     """
     Perform a single training step for diffusion.
     Args:
@@ -193,16 +218,17 @@ def train_step(key: jax.random.PRNGKey,
     # Compute gradient
     grad_fn = jax.value_and_grad(loss_fn)
     mse, grads = grad_fn(state.params)
+
     # All-reduce gradients across devices
     grads = jax.lax.pmean(grads, axis_name='batch')
     metrics = {'loss': mse}
 
     # Update train state
-    new_state = state.apply_gradients(grads=grads)
+    new_state = state.apply_grads_with_ema(grads=grads)
     return new_state, metrics
 
 
-def eval_step(key, state, batch):
+def eval_step(key, state: TrainStateWithEMA, batch):
     """Perform a single evaluation step for diffusion."""
     xyz = batch[0]  # TODO: named accession instead of index
     R = batch[1]
@@ -217,8 +243,8 @@ def eval_step(key, state, batch):
     x_t = vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
 
-    # Predict x0
-    x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
+    # Predict x0 with EMA parameters
+    x_theta = state.apply_fn(state.ema_params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
 
     # Compute metrics as actual loss
     regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
@@ -269,16 +295,20 @@ def denoising_eval_step(key, state, batch):
     return compute_metrics(x_theta, xyz)
 
 
-def save_checkpoint(workdir, state):
+def save_checkpoint(workdir, state: TrainStateWithEMA):
     state = jax.device_get(state)
     step = int(state.step)
     checkpoints.save_checkpoint(workdir, target=state, step=step, keep=3)
 
 
+def copy_tree(tree):
+    return jax.tree_map(lambda x: x.copy(), tree)
+
+
 def create_train_state(rng,
                        config: ml_collections.ConfigDict,
                        model,
-                       learning_rate_fn):
+                       learning_rate_fn) -> TrainStateWithEMA:
     """
     Creates the initial train state object.
     Args:
@@ -301,12 +331,16 @@ def create_train_state(rng,
     else:
         optimizer = optax.lion(learning_rate_fn)
 
+    optimizer = optax.chain(optimizer, optax.zero_nans())  # Make training robust to a few NaNs
+
     opt_state = optimizer.init(params)
-    state = TrainState(apply_fn=model.apply,
-                       params=params,
-                       tx=optimizer,
-                       step=0,
-                       opt_state=opt_state)
+    state = TrainStateWithEMA(apply_fn=model.apply,
+                              params=params,
+                              tx=optimizer,
+                              step=0,
+                              opt_state=opt_state,
+                              ema_params=copy_tree(params),
+                              ema_decay_rate=config.exponential_moving_avg_decay)
     return state
 
 
@@ -389,7 +423,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     logging.info("Initial compilation, this might take some minutes...")
     for step, batch in zip(range(step_offset, num_steps), train_iter):
         keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.local_device_count())
-        clamp_fape = random.uniform(0.0, 1.0) < config.fape_clamp_rate
+        clamp_fape = True  # random.uniform(0.0, 1.0) < config.fape_clamp_rate
         state, metrics = p_train_step(keys, state, batch, clamp_fape)
         if step == step_offset:
             logging.info("Initial compilation done.")
