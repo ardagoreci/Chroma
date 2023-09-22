@@ -29,74 +29,50 @@ def parse_pdb_coordinates(parser, directory):
 
 
 def model_from_coordinates(model_id, coordinates):
-    new_model = Model.Model(id=model_id)
-    chain = Chain.Chain(id='A')
-    for i in range(coordinates.shape[0]):
+    """
+    Create a Biopython PDB.Model object from a numpy array of shape [n_res, 4, 3].
+
+    Parameters:
+    - coords (numpy array): Array of shape [n_res, 4, 3] representing protein coordinates.
+
+    Returns:
+    - model (Bio.PDB.Model): A Biopython model of the protein.
+    """
+
+    # Ensure the input array has the correct shape
+    if len(coordinates.shape) != 3 or coordinates.shape[1] != 4 or coordinates.shape[2] != 3:
+        raise ValueError("Input array must have shape [n_res, 4, 3]")
+
+    # Create a new model
+    model = Model.Model(id=model_id)
+
+    # For simplicity, let's assume a single chain
+    chain = Chain.Chain("A")
+    model.add(chain)
+
+    # Define atom names (assuming a simple representation with only backbone atoms)
+    atom_names = ["N", "CA", "C", "O"]
+    atom_elements = ["N", "C", "C", "O"]
+
+    # Iterate through coordinates to construct the model
+    for i, residue_coords in enumerate(coordinates):
+        # Create a new residue object
         res_id = (' ', i + 1, ' ')
         resname = 'GLY'
         seg_id = '    '
-        res_obj = Residue.Residue(res_id, resname, seg_id)
+        res = Residue.Residue(res_id, resname, seg_id)
 
-        if coordinates.shape[1] == 1:
-            # Only CA atoms
-            ca_coord = coordinates[i][0]
-            ca_atom = Atom.Atom(name="CA",
-                                coord=ca_coord,
-                                bfactor=0.0,
-                                occupancy=1.0,
-                                altloc=' ',
-                                fullname="CA",
-                                element="C",
-                                serial_number=2)
-            res_obj.add(ca_atom)
-            chain.add(res_obj)
-
-        elif coordinates.shape[1] == 4:
-            # Backbone atoms
-            # residue.shape == (B, 3)
-            n_coord = coordinates[i][0]
-            n_atom = Atom.Atom(name="N",
-                               coord=n_coord,
-                               bfactor=0.0,
-                               occupancy=1.0,
-                               altloc=' ',
-                               fullname="N",
-                               element="N",
-                               serial_number=1)
-            ca_coord = coordinates[i][1]
-            ca_atom = Atom.Atom(name="CA",
-                                coord=ca_coord,
-                                bfactor=0.0,
-                                occupancy=1.0,
-                                altloc=' ',
-                                fullname="CA",
-                                element="C",
-                                serial_number=2)
-            c_coord = coordinates[i][2]
-            c_atom = Atom.Atom(name="C",
-                               coord=c_coord,
-                               bfactor=0.0,
-                               occupancy=1.0,
-                               altloc=' ',
-                               fullname="C",
-                               element="C",
-                               serial_number=3)
-            o_coord = coordinates[i][3]
-            o_atom = Atom.Atom(name="O",
-                               coord=o_coord,
-                               bfactor=0.0,
-                               occupancy=1.0,
-                               altloc=' ',
-                               fullname="O",
-                               element="O",
-                               serial_number=4)
-            res_obj.add(n_atom)
-            res_obj.add(ca_atom)
-            res_obj.add(c_atom)
-            res_obj.add(o_atom)
-
-            chain.add(res_obj)
-        else:
-            print("Error!")
-    new_model.add(chain)
-    return new_model
+        # Add atoms to the residue
+        for j, atom_coord in enumerate(residue_coords):
+            # Create atom object
+            atom = Atom.Atom(name=atom_names[j],
+                             coord=atom_coord,
+                             bfactor=0.0,
+                             occupancy=1.0,
+                             altloc=' ',
+                             fullname=atom_names[j],
+                             element=atom_elements[j],
+                             serial_number=j + 1)
+            res.add(atom)
+        chain.add(res)
+    return model
