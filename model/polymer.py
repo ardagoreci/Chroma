@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 # Constants for diffusion schedule (Song et al. 2021)
-B_MAX = 20
+B_MAX = 5
 B_MIN = 0.1
 
 
