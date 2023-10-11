@@ -6,8 +6,7 @@ is variable (quite difficult to make that work in JAX, so I might switch to PyTo
 """
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from polymer import rg_confined_covariance, compute_b, diffuse
-import numpy as np
+from model.polymer import rg_confined_covariance, compute_b
 
 
 def crop_proteins(ds, crop_size):

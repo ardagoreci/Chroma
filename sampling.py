@@ -3,7 +3,7 @@ new low temperature diffusion sampling procedure that increase sampling of high-
 expense of reduced sample diversity."""
 
 import jax
-from polymer import get_stable_1malpha, SNR
+from model.polymer import get_stable_1malpha, SNR
 
 
 def stable_scaling_factor(t):

@@ -1,8 +1,14 @@
-"""This file implements the methods and classes that are useful when working with protein geometry."""
+"""This file implements the methods and classes that are useful when working with protein geometry.
+TODO: I need to avoid using matrix multiplication primitives like matmul or einsum, on modern accelerator
+ on modern accelerator hardware these can end up on specialized cores such as tensor cores on GPU or the MXU on
+ cloud TPUs, this often involves lower computational precision which can be problematic for coordinate geometry.
+ Also these cores are typically optimized for larger matrices than 3 dimensional, this code is written to avoid
+ any unintended use of these cores on both GPUs and TPUs.
+"""
 import jax
 import jax.numpy as jnp
 from typing import NamedTuple, Tuple
-from protein_graph import gather_edges, gather_nodes
+from model.protein_graph import gather_nodes
 
 
 class Transforms(NamedTuple):

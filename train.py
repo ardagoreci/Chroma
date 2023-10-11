@@ -2,19 +2,22 @@
 
 import flax
 import jax
+from flax.struct import TNode
+from jax import vmap
 import ml_collections
 import optax
 import time
-from jax import lax
 import jax.numpy as jnp
-from flax.training.train_state import TrainState
+from typing import Any, Optional
 from flax.training import checkpoints
 from flax.training import common_utils
+from flax.training.train_state import TrainState
 from absl import logging
 from clu import metric_writers, periodic_actions
-import input_pipeline
-from models import Chroma
-import polymer
+from data import input_pipeline
+from model.chroma import Chroma
+from model import polymer, all_atom, r3
+import random
 
 
 def create_model(config):
@@ -116,15 +119,40 @@ def create_denoising_input_iters(config):
     return train_iter, test_iter
 
 
+class TrainStateWithEMA(TrainState):
+    """Implements a TrainState with exponential moving average of model params"""
+    ema_params: Optional[Any]
+    ema_decay_rate: Optional[float]
+
+    def apply_grads_with_ema(self, *, grads, **kwargs):
+        new_state = self.apply_gradients(grads=grads)
+        new_state = self.update_ema(new_state)
+        return new_state
+
+    def update_ema(self, new_state):
+        new_ema = jax.tree_map(lambda ema_params, params: ema_params * self.ema_decay_rate + (1 - self.ema_decay_rate) * params,
+                               self.ema_params, new_state.params)
+        new_state = TrainStateWithEMA(apply_fn=new_state.apply_fn,
+                                      params=new_state.params,
+                                      tx=new_state.tx,
+                                      step=new_state.step,
+                                      opt_state=new_state.opt_state,
+                                      ema_params=new_ema,
+                                      ema_decay_rate=new_state.ema_decay_rate)
+        return new_state
+
+
 def train_step(key: jax.random.PRNGKey,
                state: TrainState,
-               batch) -> TrainState:
+               batch,
+               clamp_fape: bool) -> TrainStateWithEMA:
     """
     Perform a single training step for diffusion.
     Args:
         key: random key for sampling timesteps
         state: train state
         batch: batch of protein xyz coordinates of shape [B, N, 4, 3] cropped to size N
+        clamp_fape: whether to clamp FAPE loss in the training step
     1. Sample timesteps
     2. Get noised protein batch
     3. Apply model to noised protein batch
@@ -132,44 +160,75 @@ def train_step(key: jax.random.PRNGKey,
     5. All-reduce gradients
     6. Update train state
     """
+    # Extract data
     xyz = batch[0]  # TODO: named accession instead of index
     R = batch[1]
     R_inverse = batch[2]
+
+    # Shapes and sizes
     batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
+
+    # Sample timesteps for the batch
     timesteps = jax.random.uniform(key, minval=1e-3, maxval=1.0, shape=(batch_size,))
-    x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
+
     # Noise protein
+    x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
-    key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
+    x_t = vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
+
+    # Make separate keys for model and dropout
+    key, dropout_key = jax.random.split(key, num=2)
 
     def loss_fn(params):
-        """Computes the diffusion loss given the parameters of the network.
-        The loss is computed according to the formula in section A.2 of Chroma Paper.
-        This loss is highly analogous to the diffusion loss used in Kingma et al. 2021."""
+        """Computes diffusion loss with Min-SNR gamma scaling"""
+        # Apply denoising model to get denoised structure, x_theta
         x_theta = state.apply_fn(params, key, x_t, timesteps, rngs={'dropout': dropout_key})
+
+        # Predicted and ground-truth frames
+        pred_frames = vmap(all_atom.coordinates_to_backbone_frames)(x_theta)
+        target_frames = vmap(all_atom.coordinates_to_backbone_frames)(xyz)
+
+        # Predicted and ground-truth atom coordinates
+        pred_positions = r3.vecs_from_tensor(x_theta)
+        target_positions = r3.vecs_from_tensor(xyz)
+
+        # FAPE clamp
+        l1_clamp_distance = None
+        if clamp_fape:
+            l1_clamp_distance = 10.0
+
+        # Compute FAPE
+        fape = vmap(all_atom.frame_aligned_point_error, in_axes=[0, 0, 0, 0, None])(pred_frames,
+                                                                                    target_frames,
+                                                                                    pred_positions,
+                                                                                    target_positions,
+                                                                                    l1_clamp_distance)
+
+        # Compute z loss
         x_theta = x_theta.reshape(x0.shape)
-        regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
-        # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
-        offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-        distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        loss = jnp.mean(distances)  # average over batch dim
+        offset = jax.vmap(jnp.matmul)(R_inverse, (x_theta - x0))  # element-wise offset from truth
+        z_loss = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+
+        # Combine losses and Min-SNR-gamma scaling
+        weights = jnp.clip(polymer.SNR(timesteps), a_max=5)
+        loss = jnp.mean((fape + z_loss) * weights)  # average over batch dim
         return loss
 
     # Compute gradient
     grad_fn = jax.value_and_grad(loss_fn)
     mse, grads = grad_fn(state.params)
+
     # All-reduce gradients across devices
     grads = jax.lax.pmean(grads, axis_name='batch')
     metrics = {'loss': mse}
 
     # Update train state
-    new_state = state.apply_gradients(grads=grads)
+    new_state = state.apply_grads_with_ema(grads=grads)
     return new_state, metrics
 
 
-def eval_step(key, state, batch):
+def eval_step(key, state: TrainStateWithEMA, batch):
     """Perform a single evaluation step for diffusion."""
     xyz = batch[0]  # TODO: named accession instead of index
     R = batch[1]
@@ -178,18 +237,22 @@ def eval_step(key, state, batch):
     n_atoms = N_res * B
     timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
+
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = jax.vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)
+    x_t = vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
-    # Predict x0
-    x_theta = state.apply_fn(state.params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
+
+    # Predict x0 with EMA parameters
+    x_theta = state.apply_fn(state.ema_params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
+
     # Compute metrics as actual loss
     regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
     # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
-    offset = jax.vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-    distances = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-    weights = jax.vmap(polymer.get_stable_1malpha)(timesteps)
+    offset = vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
+    distances = vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+
+    weights = jnp.clip(polymer.SNR(timesteps), a_max=5)  # Min-SNR-gamma scaling
     # Compute metrics as mean squared error
     return {'error': jnp.mean(distances * weights)}
 
@@ -232,16 +295,20 @@ def denoising_eval_step(key, state, batch):
     return compute_metrics(x_theta, xyz)
 
 
-def save_checkpoint(workdir, state):
+def save_checkpoint(workdir, state: TrainStateWithEMA):
     state = jax.device_get(state)
     step = int(state.step)
     checkpoints.save_checkpoint(workdir, target=state, step=step, keep=3)
 
 
+def copy_tree(tree):
+    return jax.tree_map(lambda x: x.copy(), tree)
+
+
 def create_train_state(rng,
                        config: ml_collections.ConfigDict,
                        model,
-                       learning_rate_fn):
+                       learning_rate_fn) -> TrainStateWithEMA:
     """
     Creates the initial train state object.
     Args:
@@ -256,17 +323,24 @@ def create_train_state(rng,
     params = initialize(rng, model, config,
                         local_batch_size=config.batch_size // jax.device_count())
     if 'adaptive_clipping' in config.keys():
-        optimizer = optax.chain(optax.lion(learning_rate_fn),  # optax.adam(learning_rate_fn),  #
-                                optax.adaptive_grad_clip(clipping=config.adaptive_clipping))
+        optimizer = optax.chain(optax.lion(learning_rate_fn, weight_decay=config.weight_decay),
+                                optax.adaptive_grad_clip(config.adaptive_clipping))
+    elif 'global_clipping_value' in config.keys():
+        optimizer = optax.chain(optax.lion(learning_rate_fn, weight_decay=config.weight_decay),
+                                optax.clip_by_global_norm(config.global_clipping_value))
     else:
-        optimizer = optax.lion(learning_rate_fn)  # optax.adam(learning_rate_fn)
+        optimizer = optax.lion(learning_rate_fn)
+
+    optimizer = optax.chain(optimizer, optax.zero_nans())  # Make training robust to a few NaNs
 
     opt_state = optimizer.init(params)
-    state = TrainState(apply_fn=model.apply,
-                       params=params,
-                       tx=optimizer,
-                       step=0,
-                       opt_state=opt_state)
+    state = TrainStateWithEMA(apply_fn=model.apply,
+                              params=params,
+                              tx=optimizer,
+                              step=0,
+                              opt_state=opt_state,
+                              ema_params=copy_tree(params),
+                              ema_decay_rate=config.exponential_moving_avg_decay)
     return state
 
 
@@ -337,8 +411,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     state = flax.jax_utils.replicate(state)
 
     # pmap transform train_step and eval_step
-    p_train_step = jax.pmap(train_step, axis_name='batch')  # replace denoising_train_step with train_step
-    p_eval_step = jax.pmap(eval_step, axis_name='batch')  # replace denoising_eval_step with eval_step
+    p_train_step = jax.pmap(train_step, axis_name='batch', static_broadcasted_argnums=(3,))  # broadcast clamp_fape
+    p_eval_step = jax.pmap(eval_step, axis_name='batch')
 
     # Create train loop
     train_metrics = []
@@ -349,7 +423,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     logging.info("Initial compilation, this might take some minutes...")
     for step, batch in zip(range(step_offset, num_steps), train_iter):
         keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.local_device_count())
-        state, metrics = p_train_step(keys, state, batch)
+        clamp_fape = True  # random.uniform(0.0, 1.0) < config.fape_clamp_rate
+        state, metrics = p_train_step(keys, state, batch, clamp_fape)
         if step == step_offset:
             logging.info("Initial compilation done.")
         if config.log_every_n_steps:
