@@ -34,6 +34,12 @@ def crop_proteins(ds, crop_size):
     return ds
 
 
+def center_proteins(tensor):
+    """Centers proteins to have center at origin."""
+    r_o = tf.reduce_mean(tensor, axis=0, keepdims=True)
+    return tensor - r_o
+
+
 def filter_shorts(ds, crop_size):
     """Given a dataset, filters out the proteins that are shorter than the crop size."""
 
@@ -71,12 +77,15 @@ def create_protein_dataset(crop_size: int,
     # Crop proteins
     ds = crop_proteins(ds, crop_size)
 
+    # Center proteins
+    ds = ds.map(center_proteins)
+
     # Add R and R^-1 to training data
-    a = 2.1939
-    R, R_inverse = rg_confined_covariance(n_atoms=crop_size * 4,
-                                          a=a,
-                                          b=compute_b(crop_size, 4, a))
-    ds = ds.map(lambda xyz: (xyz, R, R_inverse))
+    # a = 2.1939
+    # R, R_inverse = rg_confined_covariance(n_atoms=crop_size * 4,
+    #                                      a=a,
+    #                                      b=compute_b(crop_size, 4, a))
+    # ds = ds.map(lambda xyz: (xyz, R, R_inverse))
 
     # Batch and prefetch
     ds = ds.batch(batch_size, drop_remainder=True)  # drop_remainder for TPU training

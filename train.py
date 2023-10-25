@@ -161,9 +161,7 @@ def train_step(key: jax.random.PRNGKey,
     6. Update train state
     """
     # Extract data
-    xyz = batch[0]  # TODO: named accession instead of index
-    R = batch[1]
-    R_inverse = batch[2]
+    xyz = batch
 
     # Shapes and sizes
     batch_size, N_res, B, _ = xyz.shape
@@ -175,7 +173,8 @@ def train_step(key: jax.random.PRNGKey,
     # Noise protein
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
+    x_t = vmap(polymer.diffuse_ideal)(epsilons, x0, timesteps)
+    # vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
 
     # Make separate keys for model and dropout
     key, dropout_key = jax.random.split(key, num=2)
@@ -206,13 +205,13 @@ def train_step(key: jax.random.PRNGKey,
                                                                                     l1_clamp_distance)
 
         # Compute z loss
-        x_theta = x_theta.reshape(x0.shape)
-        offset = jax.vmap(jnp.matmul)(R_inverse, (x_theta - x0))  # element-wise offset from truth
-        z_loss = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+        # x_theta = x_theta.reshape(x0.shape)
+        # offset = jax.vmap(jnp.matmul)(R_inverse, (x_theta - x0))  # element-wise offset from truth
+        # z_loss = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
 
         # Combine losses and Min-SNR-gamma scaling
         weights = jnp.clip(polymer.SNR(timesteps), a_max=5)
-        loss = jnp.mean((fape + z_loss) * weights)  # average over batch dim
+        loss = jnp.mean(fape * weights)  # average over batch dim,   # + z_loss
         return loss
 
     # Compute gradient
