@@ -136,9 +136,7 @@ def frame_aligned_point_error(
 
     # Compute errors between the structures
     # jnp.ndarray (num_frames, num_positions)
-    error_dist = jnp.sqrt(
-        r3.vecs_squared_distance(local_pred_pos, local_target_pos)
-        + epsilon)
+    error_dist = r3.vecs_squared_distance(local_pred_pos, local_target_pos)
 
     # Normalized mean
     if l1_clamp_distance:

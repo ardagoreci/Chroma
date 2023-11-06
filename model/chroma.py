@@ -126,7 +126,7 @@ class ProteinFeatures(nn.Module):
         return jax.vmap(self.single_example_forward)(coordinates, transforms, topologies)
 
     def _rbf(self, D, d_min, d_max) -> jnp.ndarray:
-        """This function computes a number of Gaussian radial basis functions between 2 and 22 Angstroms to
+        """This function computes a number of Gaussian radial basis functions between d_min and d_max Angstroms to
         effectively encode the distance between residues. Note: this function is written for a single example.
         Args:
             D: an array encoding the distances of shape [N, K] where N is the number of residues, K is the
@@ -154,7 +154,7 @@ class ProteinFeatures(nn.Module):
         """
         D_A_B = compute_distances(A, B)  # [N, N]
         D_A_B_neighbours = gather_edges(D_A_B[:, :, None], topology)[:, :, 0]  # [N, K]
-        RBF_A_B = self._rbf(D_A_B_neighbours, d_min=2.0, d_max=42.0)  # between 2.0 and 42.0 Angstroms
+        RBF_A_B = self._rbf(D_A_B_neighbours, d_min=0.0, d_max=40.0)  # between 0.0 and 40.0 Angstroms
         return RBF_A_B
 
     def _get_pairwise_frame_features(
@@ -162,15 +162,13 @@ class ProteinFeatures(nn.Module):
             pairwise_frames: r3.Rigids  # shape (N, K)
     ) -> jnp.ndarray:  # shape (N, K, 9 + 3 * self.num_rbf)
         """Computes pairwise frame features (interresidue transforms). The rotation features are the flattened
-        rotation matrix, and the translation features are the x, y, z axes of the translation vector encoded
-        with Gaussian RBFs."""
+        rotation matrix, and the translation features are unit vectors of the translations."""
         N, K = pairwise_frames.trans.x.shape
         rot_features = r3.rots_to_tensor_flat9(pairwise_frames.rot)  # (N, K, 9)
 
-        # Translation features
-        translations = r3.vecs_to_tensor(pairwise_frames.trans)  # (N, K, 3)
-        trans_rbfs = jax.vmap(self._rbf, in_axes=(0, None, None))(translations, -20.0, 20.0)  # (N, K, 3, self.num_rbf)
-        trans_features = trans_rbfs.reshape(N, K, -1)  # (N, K, 3 * self.num_rbf)
+        # Translation features as unit vectors
+        unit_translations = r3.vecs_robust_normalize(pairwise_frames.trans)
+        trans_features = r3.vecs_to_tensor(unit_translations)  # (N, K, 3)
 
         # Concatenate features along last axis
         return jnp.concatenate([rot_features, trans_features], axis=-1)
@@ -216,7 +214,7 @@ class ProteinFeatures(nn.Module):
         offset = topology - jnp.arange(coordinates.shape[0])[:, None]  # [N, K]
         positional_embedding = self.pos_embeddings(offset, mask=1.0)  # mask hardcoded for now
 
-        # Compute inter-residue geometry  TODO: change required for r3
+        # Compute inter-residue geometry
         pairwise_frames = all_atom.compute_pairwise_frames(transforms, topology)  # T_ij (N, K)
         interresidue_transforms = self._get_pairwise_frame_features(pairwise_frames)
 
@@ -249,7 +247,7 @@ class MPNNLayer(nn.Module):
     edge_mlp_hidden_dim: int
     node_mlp_hidden_dim: int
     dropout: float = 0.1
-    scale: int = 60
+    scale: int = 40
     residual_scale: float = 0.7071  # scale skip connections with 1/sqrt(2)
 
     def setup(self):

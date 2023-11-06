@@ -173,7 +173,7 @@ def train_step(key: jax.random.PRNGKey,
     # Noise protein
     x0 = jnp.reshape(xyz, newshape=(batch_size, n_atoms, 3))
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = vmap(polymer.diffuse_ideal)(epsilons, x0, timesteps)
+    x_t = vmap(polymer.diffuse_ideal)(epsilons, x0, timesteps).reshape(xyz.shape)
     # vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)  # [B, N, 4, 3]
 
     # Make separate keys for model and dropout
@@ -195,7 +195,7 @@ def train_step(key: jax.random.PRNGKey,
         # FAPE clamp
         l1_clamp_distance = None
         if clamp_fape:
-            l1_clamp_distance = 10.0
+            l1_clamp_distance = 100.0
 
         # Compute FAPE
         fape = vmap(all_atom.frame_aligned_point_error, in_axes=[0, 0, 0, 0, None])(pred_frames,
@@ -208,10 +208,13 @@ def train_step(key: jax.random.PRNGKey,
         # x_theta = x_theta.reshape(x0.shape)
         # offset = jax.vmap(jnp.matmul)(R_inverse, (x_theta - x0))  # element-wise offset from truth
         # z_loss = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+        x_theta_in_z = vmap(polymer.coordinates_to_z_space)(x_theta.reshape(x0.shape))
+        x0_in_z = vmap(polymer.coordinates_to_z_space)(x0)
+        ideal_z_loss = mean_squared_error(x0_in_z, x_theta_in_z)
 
         # Combine losses and Min-SNR-gamma scaling
         weights = jnp.clip(polymer.SNR(timesteps), a_max=5)
-        loss = jnp.mean(fape * weights)  # average over batch dim,   # + z_loss
+        loss = jnp.mean(ideal_z_loss * weights)  # average over batch dim
         return loss
 
     # Compute gradient
@@ -229,9 +232,9 @@ def train_step(key: jax.random.PRNGKey,
 
 def eval_step(key, state: TrainStateWithEMA, batch):
     """Perform a single evaluation step for diffusion."""
-    xyz = batch[0]  # TODO: named accession instead of index
-    R = batch[1]
-    R_inverse = batch[2]
+    xyz = batch
+
+    # Shapes and sizes
     batch_size, N_res, B, _ = xyz.shape
     n_atoms = N_res * B
     timesteps = jax.random.uniform(key, minval=0, maxval=1.0, shape=(batch_size,))
@@ -239,21 +242,20 @@ def eval_step(key, state: TrainStateWithEMA, batch):
 
     # Noise protein
     epsilons = jax.random.normal(key, shape=x0.shape)  # epsilons drawn from normal distribution
-    x_t = vmap(polymer.diffuse)(epsilons, R, x0, timesteps).reshape(xyz.shape)
+    x_t = vmap(polymer.diffuse_ideal)(epsilons, x0, timesteps).reshape(xyz.shape)
     key, dropout_key = jax.random.split(key, num=2)  # for model apply_fn
 
     # Predict x0 with EMA parameters
     x_theta = state.apply_fn(state.ema_params, key, x_t, timesteps, rngs={'dropout': dropout_key}).reshape(x0.shape)
 
-    # Compute metrics as actual loss
-    regularized_inverse = R_inverse + jnp.expand_dims(0.1 * jnp.identity(n=n_atoms), axis=0)  # regularized for
-    # absolute errors in x space (nanometers), expanded for broadcasting across batch dimension
-    offset = vmap(jnp.matmul)(regularized_inverse, (x_theta - x0))  # element-wise offset from truth
-    distances = vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
+    # Compute z_loss as evaluation metric
+    x_theta_in_z = vmap(polymer.coordinates_to_z_space)(x_theta)
+    x0_in_z = vmap(polymer.coordinates_to_z_space)(x0)
+    ideal_z_loss = mean_squared_error(x0_in_z, x_theta_in_z)
 
     weights = jnp.clip(polymer.SNR(timesteps), a_max=5)  # Min-SNR-gamma scaling
     # Compute metrics as mean squared error
-    return {'error': jnp.mean(distances * weights)}
+    return {'error': jnp.mean(ideal_z_loss * weights)}
 
 
 def denoising_train_step(key: jax.random.PRNGKey,
@@ -422,7 +424,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict,
     logging.info("Initial compilation, this might take some minutes...")
     for step, batch in zip(range(step_offset, num_steps), train_iter):
         keys = jax.random.split(jax.random.PRNGKey(config.seed + step), jax.local_device_count())
-        clamp_fape = True  # random.uniform(0.0, 1.0) < config.fape_clamp_rate
+        clamp_fape = random.uniform(0.0, 1.0) < config.fape_clamp_rate
         state, metrics = p_train_step(keys, state, batch, clamp_fape)
         if step == step_offset:
             logging.info("Initial compilation done.")

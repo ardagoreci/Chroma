@@ -57,6 +57,14 @@ def ideal_covariance(z, delta=1.0):
     return rz - r_o
 
 
+def coordinates_to_z_space(x0, delta=1.0):
+    """This method maps the coordinates of shape [N_atoms, 3] to z space."""
+    gamma = compute_gamma(x0.shape[0])
+    x_1 = jnp.expand_dims(x0[0], axis=0)
+    x_hat = x0 - x_1 + (1/delta * jnp.mean(x0, axis=0, keepdims=True))
+    return jnp.diff(x_hat, axis=0, prepend=x_1) / gamma
+
+
 def compute_expected_rg(num_residues):
     """Computes the expected radius of gyration given the number of residues in the chain.
     From Tanner et al. 2006."""
@@ -182,10 +190,15 @@ def get_stable_cosine_1malpha(t, epsilon=1e-3):
     return 1.0 - alpha_t
 
 
+def SNR(t):
+    """Signal-to-noise ratio"""
+    return get_cosine_alpha_t(t) / get_stable_cosine_1malpha(t)
+
 
 # -----------------------------------------------------------------------------
 # Operations for beta-linear schedule
 # -----------------------------------------------------------------------------
+
 
 def get_alpha_t(t):
     """Returns the alpha_t value that is equivalent to the perturbation kernel used in Song et al. 2021"""
@@ -203,10 +216,6 @@ def get_beta_t(t):
     """Returns the ß(t) value that is used in the SDEs. The ß(t) schedule is the same as that used in
     Song et al. 2021."""
     return B_MIN + t * (B_MAX - B_MIN)
-
-
-def SNR(t):
-    return get_alpha_t(t) / get_stable_1malpha(t)
 
 
 def deflate_mean(x, xi):

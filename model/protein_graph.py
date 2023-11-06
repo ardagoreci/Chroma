@@ -91,7 +91,7 @@ def sample_random_graph(key, backbone_coordinates, temperature=1.0) -> jnp.array
     # First get top 20 nearest neighbours (unit-tested)
     argsorted_distances = jnp.argsort(distances, axis=1)
     k_nearest = 20
-    k_cubic = 40
+    k_cubic = 20
     top_k_nearest_neighbours = argsorted_distances[:, :k_nearest]  # top_k_nearest_neighbours.shape == (N_res, 20)
 
     # Sample rest with inverse cubic distance
