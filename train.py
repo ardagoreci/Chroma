@@ -208,13 +208,13 @@ def train_step(key: jax.random.PRNGKey,
         # x_theta = x_theta.reshape(x0.shape)
         # offset = jax.vmap(jnp.matmul)(R_inverse, (x_theta - x0))  # element-wise offset from truth
         # z_loss = jax.vmap(mean_squared_error)(offset, jnp.zeros_like(offset))  # [B,]
-        x_theta_in_z = vmap(polymer.coordinates_to_z_space)(x_theta.reshape(x0.shape))
-        x0_in_z = vmap(polymer.coordinates_to_z_space)(x0)
-        ideal_z_loss = mean_squared_error(x0_in_z, x_theta_in_z)
+        # x_theta_in_z = vmap(polymer.coordinates_to_z_space)(x_theta.reshape(x0.shape))
+        # x0_in_z = vmap(polymer.coordinates_to_z_space)(x0)
+        # ideal_z_loss = mean_squared_error(x0_in_z, x_theta_in_z)
 
         # Combine losses and Min-SNR-gamma scaling
         weights = jnp.clip(polymer.SNR(timesteps), a_max=5)
-        loss = jnp.mean(ideal_z_loss * weights)  # average over batch dim
+        loss = jnp.mean(fape * weights)  # average over batch dim
         return loss
 
     # Compute gradient
